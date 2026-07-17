@@ -234,7 +234,7 @@ Notes:
 - Preserve existing architecture boundaries instead of introducing cross-layer shortcuts.
 - Add or update tests when behavior changes.
 - Before calling work complete, prefer `npm run check` and any additional targeted test coverage your change needs.
-- Do not create commits from the agent unless the user explicitly asks. If the user only wants a commit message, provide the message text instead of running `git commit`.
+- Agents may create commits only when the user explicitly requests a commit. If the user only wants a commit message, provide the message text instead of running `git commit`; do not commit by default.
 
 ## Useful paths
 

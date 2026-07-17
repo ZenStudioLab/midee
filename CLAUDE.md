@@ -75,4 +75,4 @@ Add a rule only after an agent **repeats** the same mistake. Otherwise put detai
 
 ## Other rules
 
-- Never commit the code, when user asks for commit msg, just print it in code block
+- Agents may create commits only when the user explicitly requests a commit. If the user only wants a commit message, print the message in a code block instead of running `git commit`; do not commit by default.
