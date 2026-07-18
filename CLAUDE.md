@@ -59,7 +59,7 @@ Longer plans live in **`docs/`** — open the specific doc when needed; don’t 
 
 ## Working docs (`docs/`)
 
-- **Location:** New task plans, handoffs, and research notes go under **`docs/`** (not the repo root). Existing examples: dated filenames like `docs/BUNDLE_TTI_HANDOFF_2026-04-20.md`.
+- **Location:** New task plans, handoffs, and research notes go under **`docs/`** (not the repo root).
 - **Date:** Every new doc must record **when it was started** — prefer **`YYYY-MM-DD` in the filename** and add a **`Date:`** (or **Created:**) line near the top of the file.
 - **Progress:** Keep **status inside the same file** as work proceeds: checklists, phases, or a short **Progress** / **Log** section (update timestamps when you change status).
 - **Done:** When the initiative is **finished**, **move** the file to **`docs/done/`** (archive of completed write-ups; do not leave completed plans cluttering `docs/` root unless they remain canonical reference docs you still want discoverable there).
