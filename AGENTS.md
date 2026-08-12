@@ -236,6 +236,17 @@ Notes:
 - Before calling work complete, prefer `npm run check` and any additional targeted test coverage your change needs.
 - Agents may create commits only when the user explicitly requests a commit. If the user only wants a commit message, provide the message text instead of running `git commit`; do not commit by default.
 
+## Working-document lifecycle
+
+- Put new task plans, handoffs, and research under `docs/`, not the repository root.
+- Date each new working document: prefer `YYYY-MM-DD` in its filename and add a `Date:` or `Created:` line near the top.
+- Keep its status in the same file through checklists, phases, or a brief progress/log section with updated timestamps.
+- Move completed working documents to `docs/done/` unless they remain canonical reference documentation that must stay discoverable.
+
+## Instruction maintenance
+
+- Add governance only after repeated mistakes; otherwise keep detail in `docs/` or colocated code comments.
+
 ## Useful paths
 
 - Entry: `index.html`, `src/main.tsx`
