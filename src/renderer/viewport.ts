@@ -1,4 +1,5 @@
 import { isBlackKey, MIDI_MAX, MIDI_MIN, type MidiNote } from '../core/midi/types'
+import { BLACK_KEY_HEIGHT_RATIO } from './keyGeometry'
 
 // The strike line sits directly on the keyboard edge so notes "land" where the
 // keys begin instead of floating relative to the HUD.
@@ -69,6 +70,15 @@ export class Viewport {
     return this.nowLineY - deltaSeconds * this.cfg.pixelsPerSecond
   }
 
+  // Draw sites must gate on this: pitchToX/pitchWidth fall back to 0 for an
+  // unmapped pitch, which paints a degenerate bar at x = 0 instead of nothing.
+  // A miss is normal — a note off the 88 keys (in the file, or pushed there by
+  // a transpose) or outside a narrowed pitchMin/pitchMax ("Fit to piece"). It
+  // is still audible; it just has nowhere to be drawn.
+  hasKey(pitch: number): boolean {
+    return this.keyPositions.has(pitch)
+  }
+
   pitchToX(pitch: number): number {
     return this.keyPositions.get(pitch)?.x ?? 0
   }
@@ -94,7 +104,7 @@ export class Viewport {
     const keyboardTop = canvasHeight - keyboardHeight
     if (y < keyboardTop || y > canvasHeight) return null
 
-    const blackZoneBottom = keyboardTop + keyboardHeight * 0.62
+    const blackZoneBottom = keyboardTop + keyboardHeight * BLACK_KEY_HEIGHT_RATIO
     if (y <= blackZoneBottom) {
       for (const [pitch, pos] of this.keyPositions) {
         if (!isBlackKey(pitch)) continue

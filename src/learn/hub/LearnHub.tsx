@@ -58,7 +58,7 @@ const CATEGORY_ICON: Record<ExerciseCategory, string> = {
   'play-along':
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4v16M12 6v10M17 8v6"/></svg>',
   'sight-reading':
-    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 11h16M4 16h10"/><circle cx="18" cy="16" r="2"/></svg>',
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12.4 21.2c-1.9 0-3.4-1.3-3.4-3 0-1.5 1.1-2.6 2.6-2.6 1.3 0 2.3.9 2.3 2.1 0 1-.7 1.8-1.7 1.8"/><path d="M11.6 18.6 10 8.9C9.6 6.4 10.4 3 12.4 2.8c1.4-.1 2.2 1.3 2.2 2.9 0 2.6-1.9 4.6-4 6.2-1.9 1.5-3.6 2.8-3.6 4.9 0 2 1.6 3.6 3.9 3.6"/></svg>',
   'ear-training':
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 18a5 5 0 0 1 0-10 3 3 0 1 1 6 0v10"/><path d="M14 14h4"/></svg>',
   theory:
@@ -85,43 +85,45 @@ function Hero(props: LearnHubOptions) {
     const label = categoryLabel(featured.category)
     return label.toLowerCase() === featured.title.toLowerCase() ? t('learn.hub.recommended') : label
   }
+  // The whole card is the affordance: upload a MIDI when none is loaded,
+  // otherwise start the play-along with the loaded piece.
+  const activate = (): void => {
+    if (loaded()) props.launchExercise(featured)
+    else props.onOpenFilePicker()
+  }
+  const actionLabel = (): string => {
+    const midi = loaded()
+    return midi ? t('learn.hub.startWith', { name: midi.name }) : t('learn.hub.uploadMidi')
+  }
+  // The card itself is the button — all-phrasing content (spans), so it's a
+  // valid, fully-clickable, keyboard-accessible <button>. The corner icon is
+  // the only affordance; aria-label carries the action for screen readers.
   return (
-    <div class="hero-card" data-category={featured.category}>
-      <div class="hero-card__badge" innerHTML={CATEGORY_ICON[featured.category]} />
-      <div class="hero-card__body">
+    <button
+      class="hero-card hero-card--clickable"
+      type="button"
+      data-category={featured.category}
+      aria-label={actionLabel()}
+      onClick={activate}
+    >
+      <span
+        class="hero-card__badge"
+        aria-hidden="true"
+        innerHTML={CATEGORY_ICON[featured.category]}
+      />
+      <span class="hero-card__body">
         <span class="hero-card__kicker">{kicker()}</span>
-        <h2 class="hero-card__title">{featured.title}</h2>
-        <p class="hero-card__blurb">{featured.blurb}</p>
-      </div>
-      <div class="hero-card__actions">
-        <Show
-          when={loaded()}
-          fallback={
-            <button
-              class="hero-card__primary"
-              type="button"
-              onClick={() => props.onOpenFilePicker()}
-            >
-              <span class="hero-card__primary-icon" aria-hidden="true" innerHTML={ICON_UPLOAD} />
-              <span class="hero-card__primary-label">{t('learn.hub.uploadMidi')}</span>
-            </button>
-          }
-        >
-          {(midi) => (
-            <button
-              class="hero-card__primary"
-              type="button"
-              onClick={() => props.launchExercise(featured)}
-            >
-              <span class="hero-card__primary-icon" aria-hidden="true" innerHTML={ICON_PLAY} />
-              <span class="hero-card__primary-label">
-                {t('learn.hub.startWith', { name: midi().name })}
-              </span>
-            </button>
-          )}
-        </Show>
-      </div>
-    </div>
+        <span class="hero-card__title">{featured.title}</span>
+        <span class="hero-card__blurb">{featured.blurb}</span>
+      </span>
+      <span class="hero-card__actions">
+        <span
+          class="hero-card__cue-icon"
+          aria-hidden="true"
+          innerHTML={loaded() ? ICON_PLAY : ICON_UPLOAD}
+        />
+      </span>
+    </button>
   )
 }
 

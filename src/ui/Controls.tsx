@@ -3,6 +3,7 @@ import { createStore, type SetStoreFunction } from 'solid-js/store'
 import { render } from 'solid-js/web'
 import type { AppServices } from '../core/services'
 import { t } from '../i18n'
+import { isSpaceActivatedControl, isTextEntryTarget } from '../learn/core/keyboard'
 import type { LiveLooperState } from '../midi/LiveLooper'
 import type { MidiDeviceStatus } from '../midi/MidiInputManager'
 import type { AppMode } from '../store/state'
@@ -25,7 +26,9 @@ import {
   ZOOM_DEFAULT,
 } from './ControlsView'
 import { DragCoachmark } from './DragCoachmark'
+import { ExportCoachmark } from './ExportCoachmark'
 import { isLearnCoachmarkSeen, LearnCoachmark } from './LearnCoachmark'
+import { PEDAL_HIDDEN, type PedalIndicatorState } from './pedalIndicator'
 
 const SKIP_SECONDS = 10
 
@@ -37,6 +40,7 @@ export { ZOOM_DEFAULT, ZOOM_MAX, ZOOM_MIN } from './ControlsView'
 interface UiStoreShape {
   context: { kicker: string; title: string }
   midi: { status: MidiDeviceStatus; deviceName: string }
+  pedal: PedalIndicatorState
   session: { recording: boolean; elapsed: number }
   loop: { state: LiveLooperState; layerCount: number; progressDeg: number }
   metro: { running: boolean; bpm: number }
@@ -47,6 +51,9 @@ export interface ControlsOptions {
   services: AppServices
   onSeek?: (t: number) => void
   onZoom?: (pps: number) => void
+  // App owns the re-derive: the store swaps `loadedMidi`, then the synth has
+  // to be reloaded and rescheduled. Controls only reports the intent.
+  onTranspose?: (semitones: number) => void
   onThemeCycle?: () => void
   onMidiConnect?: () => void
   onOpenTracks?: () => void
@@ -57,13 +64,13 @@ export interface ControlsOptions {
   onHome?: () => void
   onInstrumentCycle?: () => void
   onParticleCycle?: () => void
-  onLoopToggle?: () => void
-  onLoopClear?: () => void
+  onLoopToggle?: (method: 'shortcut' | 'button') => void
+  onLoopClear?: (method: 'shortcut' | 'button') => void
   onLoopSave?: () => void
-  onLoopUndo?: () => void
-  onMetronomeToggle?: () => void
+  onLoopUndo?: (method: 'shortcut' | 'button') => void
+  onMetronomeToggle?: (method: 'shortcut' | 'button') => void
   onMetronomeBpmChange?: (bpm: number) => void
-  onSessionToggle?: () => void
+  onSessionToggle?: (method: 'shortcut' | 'button') => void
   onChordToggle?: () => void
   onOctaveShift?: (delta: number) => void
 }
@@ -105,6 +112,8 @@ export class Controls {
   private readonly hudHasDraggedSig: () => boolean
   private readonly setInstrumentLoadingSig: (v: boolean) => void
   private readonly setKeyHintCollapsed: (v: boolean) => void
+  private readonly setHudClosed: (v: boolean) => void
+  private readonly hudClosedSig: () => boolean
   private readonly setOctave: (v: number) => void
   private readonly setVolume: (v: number) => void
   private readonly setSpeed: (v: number) => void
@@ -117,6 +126,19 @@ export class Controls {
     if (m === 'play' || m === 'live') this.wakeUp()
   }
   private onKeyDownDoc = (e: KeyboardEvent): void => this.handleKey(e)
+
+  // A HUD button clicked with the mouse keeps focus, and then Space "activates
+  // the focused button" instead of toggling playback — so pressing Space after
+  // touching skip / speed / mute did nothing useful. Drop focus on mouse
+  // clicks only: a keyboard-synthesised click reports detail === 0 and keeps
+  // its focus, so Tab-then-Space still activates the button you are on.
+  // Sliders are deliberately excluded — click-then-arrow-key must keep working.
+  // Scoped to .float-hud so play-along and sight-reading behave identically.
+  private onClickDoc = (e: MouseEvent): void => {
+    if (e.detail === 0) return
+    const btn = (e.target as HTMLElement | null)?.closest?.('button')
+    if (btn?.closest('.float-hud')) btn.blur()
+  }
 
   constructor(private opts: ControlsOptions) {
     const { store } = opts.services
@@ -133,9 +155,12 @@ export class Controls {
     const [learnCoachmarkSeen, setLearnCoachmarkSeen] = createSignal(isLearnCoachmarkSeen())
     const [instrumentLoading, setInstrumentLoading] = createSignal(false)
     const [keyHintCollapsed, setKeyHintCollapsed] = createSignal(loadKeyHintHidden())
+    // Session-only: the HUD always starts open on load (not persisted).
+    const [hudClosed, setHudClosed] = createSignal(false)
     const [octave, setOctave] = createSignal(4)
     const [volume, setVolumeSig] = createSignal(store.state.volume ?? 0.8)
     const [speed, setSpeedSig] = createSignal(store.state.speed ?? 1)
+    const [transpose, setTransposeSig] = createSignal(store.state.transpose ?? 0)
     const [zoom, setZoomSig] = createSignal(ZOOM_DEFAULT)
 
     const [uiStore, setUi] = createStore<UiStoreShape>({
@@ -144,6 +169,7 @@ export class Controls {
         title: t('topStrip.context.ready.title'),
       },
       midi: { status: 'disconnected', deviceName: '' },
+      pedal: PEDAL_HIDDEN,
       session: { recording: false, elapsed: 0 },
       loop: { state: 'idle', layerCount: 0, progressDeg: 0 },
       metro: { running: false, bpm: 120 },
@@ -158,6 +184,8 @@ export class Controls {
     this.hudHasDraggedSig = hudHasDragged
     this.setInstrumentLoadingSig = setInstrumentLoading
     this.setKeyHintCollapsed = setKeyHintCollapsed
+    this.setHudClosed = setHudClosed
+    this.hudClosedSig = hudClosed
     this.setOctave = setOctave
     this.setVolume = setVolumeSig
     this.setSpeed = setSpeedSig
@@ -183,6 +211,7 @@ export class Controls {
             midiDeviceName={() => uiStore.midi.deviceName}
             midiPillLabel={() => getMidiPillLabel(uiStore.midi.status, uiStore.midi.deviceName)}
             midiMenuLabel={() => getMidiMenuLabel(uiStore.midi.status, uiStore.midi.deviceName)}
+            pedal={() => uiStore.pedal}
             dim={dimTopStrip}
             onHome={() => opts.onHome?.()}
             onMode={(m) => opts.onModeRequest?.(m)}
@@ -204,6 +233,16 @@ export class Controls {
               mode() === 'play' && hasFile() && status() !== 'loading' && status() !== 'exporting'
             }
             onShow={() => setLearnCoachmarkSeen(true)}
+          />
+          <ExportCoachmark
+            eligible={() =>
+              // After the Learn bubble, never alongside it.
+              learnCoachmarkSeen() &&
+              mode() === 'play' &&
+              hasFile() &&
+              status() !== 'loading' &&
+              status() !== 'exporting'
+            }
           />
           <HudView
             mode={mode}
@@ -252,7 +291,7 @@ export class Controls {
               opts.onZoom?.(v)
               trackEventSettled('zoom_changed', { zoom: Math.round(v) })
             }}
-            onMetroToggle={() => opts.onMetronomeToggle?.()}
+            onMetroToggle={() => opts.onMetronomeToggle?.('button')}
             onBpmDec={() => this.bumpBpm(-1)}
             onBpmInc={() => this.bumpBpm(+1)}
             onBpmWheel={(e) => {
@@ -260,11 +299,11 @@ export class Controls {
               const step = e.shiftKey ? 10 : 1
               this.bumpBpm(dir * step)
             }}
-            onSession={() => opts.onSessionToggle?.()}
-            onLoop={() => opts.onLoopToggle?.()}
-            onLoopUndo={() => opts.onLoopUndo?.()}
+            onSession={() => opts.onSessionToggle?.('button')}
+            onLoop={() => opts.onLoopToggle?.('button')}
+            onLoopUndo={() => opts.onLoopUndo?.('button')}
             onLoopSave={() => opts.onLoopSave?.()}
-            onLoopClear={() => opts.onLoopClear?.()}
+            onLoopClear={() => opts.onLoopClear?.('button')}
             onScrubberDown={() => {
               this.isScrubbing = true
               this.wakeUp()
@@ -305,6 +344,8 @@ export class Controls {
             volume={volume}
             speed={speed}
             speedLabel={() => formatSpeed(speed())}
+            transpose={transpose}
+            onTranspose={(v) => opts.onTranspose?.(v)}
             zoom={zoom}
             wakeRef={(fn) => {
               this.hudWake = fn
@@ -322,6 +363,12 @@ export class Controls {
                 saveHudHasDragged()
               }
             }}
+            closed={hudClosed}
+            onClose={() => {
+              this.setHudClosed(true)
+              this.hudWake?.()
+            }}
+            onReopen={() => this.setHudClosed(false)}
           />
           {/* Mounted *after* HudView so the `#hud-drag` anchor exists when
               the coachmark's onMount looks it up. */}
@@ -336,6 +383,7 @@ export class Controls {
               status() !== 'loading' &&
               status() !== 'exporting' &&
               (mode() === 'play' || mode() === 'live') &&
+              !hudClosed() &&
               !hudIdle()
             }
             hasDragged={hudHasDragged}
@@ -384,6 +432,12 @@ export class Controls {
           this.refreshUi()
         },
       ),
+      // The store clamps and resets-on-load, so the chip mirrors the store
+      // rather than holding its own truth.
+      watch(
+        () => store.state.transpose,
+        (n) => setTransposeSig(n),
+      ),
       watch(
         () => store.state.duration,
         (d) => {
@@ -429,6 +483,7 @@ export class Controls {
 
     document.addEventListener('mousemove', this.onMouseMoveDoc)
     document.addEventListener('keydown', this.onKeyDownDoc)
+    document.addEventListener('click', this.onClickDoc)
 
     this.refreshUi()
   }
@@ -484,6 +539,11 @@ export class Controls {
     this.refreshUi()
   }
 
+  // App computes the state (see pedalIndicator.ts) and only calls on change.
+  updatePedal(state: PedalIndicatorState): void {
+    this.setUi('pedal', state)
+  }
+
   // Push the currently-loaded Learn-mode song name into the topbar context.
   // Called by LearnController when its MIDI store changes — Learn keeps its
   // own state to avoid disturbing Play, so this can't ride the existing
@@ -512,6 +572,7 @@ export class Controls {
     this.unsubs = []
     document.removeEventListener('mousemove', this.onMouseMoveDoc)
     document.removeEventListener('keydown', this.onKeyDownDoc)
+    document.removeEventListener('click', this.onClickDoc)
     this.disposeRoot?.()
     this.disposeRoot = null
     this.compactRO?.disconnect()
@@ -558,9 +619,15 @@ export class Controls {
     // Reading scrollWidth/clientWidth after dropping .ts-compact forces a
     // synchronous reflow, but the browser only paints after this callback
     // returns — so re-adding the class (when not clipping) is flicker-free.
-    strip.classList.remove('ts-compact')
-    const clips = title.scrollWidth - title.clientWidth > 1
-    strip.classList.toggle('ts-compact', clips)
+    strip.classList.remove('ts-compact', 'ts-compact-export')
+    const titleClips = title.scrollWidth - title.clientWidth > 1
+    if (!titleClips) return
+    // Tier 1: secondary labels go so the title gets room. Export is the
+    // strip's star action, so it keeps its label unless the strip itself
+    // still overflows (pills pushed off the right edge) — a long title being
+    // ellipsised is fine, pills being unreachable is not.
+    strip.classList.add('ts-compact')
+    if (strip.scrollWidth - strip.clientWidth > 1) strip.classList.add('ts-compact-export')
   }
 
   private handlePlayClick(): void {
@@ -597,12 +664,43 @@ export class Controls {
 
   private handleKey(e: KeyboardEvent): void {
     const target = e.target as HTMLElement
-    if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return
+    if (isTextEntryTarget(target)) return
+
+    // Space belongs to a focused button/checkbox/radio, which use it natively.
+    // Mouse clicks no longer leave focus on HUD buttons (see onClickDoc), so a
+    // control focused here got there by keyboard and must keep its own Space —
+    // otherwise a Tab-focused track toggle can never be operated.
+    if (e.code === 'Space' && isSpaceActivatedControl(target)) return
+
+    // Arrows belong to a focused slider; skipping the transport from there
+    // would fight the control the user is actually holding.
+    if (
+      (e.code === 'ArrowLeft' || e.code === 'ArrowRight') &&
+      target instanceof HTMLInputElement &&
+      target.type === 'range'
+    ) {
+      return
+    }
+
     const mode = this.opts.services.store.state.mode
 
     if (e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && e.code === 'KeyP') {
       e.preventDefault()
       this.hudTogglePin?.()
+      return
+    }
+
+    // Bare H toggles the control bar, but only in the modes where it exists.
+    if (
+      e.code === 'KeyH' &&
+      !e.shiftKey &&
+      !e.metaKey &&
+      !e.ctrlKey &&
+      !e.altKey &&
+      (mode === 'play' || mode === 'live')
+    ) {
+      e.preventDefault()
+      this.setHudClosed(!this.hudClosedSig())
       return
     }
 
@@ -631,12 +729,12 @@ export class Controls {
     if (mode === 'live') {
       if (e.code === 'Tab') {
         e.preventDefault()
-        this.opts.onSessionToggle?.()
+        this.opts.onSessionToggle?.('shortcut')
         return
       }
       if (e.code === 'Backquote') {
         e.preventDefault()
-        this.opts.onMetronomeToggle?.()
+        this.opts.onMetronomeToggle?.('shortcut')
         return
       }
 
@@ -646,23 +744,23 @@ export class Controls {
         switch (e.code) {
           case 'KeyR':
             e.preventDefault()
-            this.opts.onSessionToggle?.()
+            this.opts.onSessionToggle?.('shortcut')
             break
           case 'KeyL':
             e.preventDefault()
-            this.opts.onLoopToggle?.()
+            this.opts.onLoopToggle?.('shortcut')
             break
           case 'KeyU':
             e.preventDefault()
-            this.opts.onLoopUndo?.()
+            this.opts.onLoopUndo?.('shortcut')
             break
           case 'KeyC':
             e.preventDefault()
-            this.opts.onLoopClear?.()
+            this.opts.onLoopClear?.('shortcut')
             break
           case 'KeyM':
             e.preventDefault()
-            this.opts.onMetronomeToggle?.()
+            this.opts.onMetronomeToggle?.('shortcut')
             break
         }
       }

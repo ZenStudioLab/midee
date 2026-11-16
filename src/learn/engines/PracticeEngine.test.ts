@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { MasterClock } from '../../core/clock/MasterClock'
-import type { MidiFile } from '../../core/midi/types'
+import { type MidiFile, nominalTempoMap } from '../../core/midi/types'
 import { PracticeEngine } from './PracticeEngine'
 
 function makeClock() {
@@ -33,6 +33,7 @@ function midiWithNotes(notes: Array<{ pitch: number; time: number }>): MidiFile 
     duration: 10,
     bpm: 120,
     timeSignature: [4, 4],
+    ...nominalTempoMap(120, [4, 4]),
     tracks: [
       {
         id: 'rh',
@@ -40,7 +41,6 @@ function midiWithNotes(notes: Array<{ pitch: number; time: number }>): MidiFile 
         channel: 0,
         instrument: 0,
         isDrum: false,
-        color: 0xffffff,
         colorIndex: 0,
         notes: notes.map((note) => ({
           ...note,
@@ -258,6 +258,7 @@ describe('PracticeEngine step building and peekNextStep', () => {
       duration: 10,
       bpm: 120,
       timeSignature: [4, 4],
+      ...nominalTempoMap(120, [4, 4]),
       tracks: [
         {
           id: 'dr',
@@ -265,7 +266,6 @@ describe('PracticeEngine step building and peekNextStep', () => {
           channel: 9,
           instrument: 0,
           isDrum: true,
-          color: 0xffffff,
           colorIndex: 0,
           notes: [{ pitch: 36, time: 2, duration: 0.1, velocity: 1 }],
         },
@@ -275,6 +275,23 @@ describe('PracticeEngine step building and peekNextStep', () => {
     clock.emit(2.01)
     expect(engine.isWaiting).toBe(false)
     expect(onWaitStart).not.toHaveBeenCalled()
+  })
+
+  it('skips notes off the 88-key piano — nothing to press, so never a wait step', () => {
+    // A0 is 21, C8 is 108. 10 and 120 are audible but have no key.
+    const midi = midiWithNotes([
+      { pitch: 10, time: 1 },
+      { pitch: 120, time: 1 },
+      { pitch: 60, time: 2 },
+      { pitch: 115, time: 2 },
+    ])
+    const { clock, engine, onWaitStart } = makeEngine(midi)
+    clock.emit(1.01)
+    expect(engine.isWaiting).toBe(false)
+    clock.emit(2.0)
+    expect(engine.isWaiting).toBe(true)
+    expect([...(engine.peekNextStep()?.pitches ?? [])]).toEqual([60])
+    expect(onWaitStart).toHaveBeenCalledTimes(1)
   })
 
   it('peekNextStep returns the upcoming step before it is cleared', () => {
@@ -308,6 +325,7 @@ function midiWithTwoTracks(): MidiFile {
     duration: 10,
     bpm: 120,
     timeSignature: [4, 4],
+    ...nominalTempoMap(120, [4, 4]),
     tracks: [
       {
         id: 'rh',
@@ -315,7 +333,6 @@ function midiWithTwoTracks(): MidiFile {
         channel: 0,
         instrument: 0,
         isDrum: false,
-        color: 0xffffff,
         colorIndex: 0,
         notes: [{ pitch: 60, time: 2, duration: 0.5, velocity: 1 }],
       },
@@ -325,7 +342,6 @@ function midiWithTwoTracks(): MidiFile {
         channel: 1,
         instrument: 0,
         isDrum: false,
-        color: 0xffffff,
         colorIndex: 1,
         notes: [{ pitch: 48, time: 4, duration: 0.5, velocity: 1 }],
       },

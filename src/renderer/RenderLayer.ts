@@ -46,4 +46,17 @@ export interface RenderLayer {
   // Called when static state changes (viewport resize, theme swap, keyboard
   // height, zoom). Redraw anything that depends on layout.
   rebuild?(ctx: RenderContext): void
+
+  // Whether the layer still needs per-frame redraws; the renderer idle-stops
+  // its ticker when nothing animates. Omitted = always animating. Only return
+  // `false` if every imperative entry point on the layer calls `renderer.wake()`.
+  isAnimating?(): boolean
+}
+
+// Pure so the idle-stop decision is testable without a Pixi Application.
+export function layersAnimating(layers: readonly RenderLayer[]): boolean {
+  for (const layer of layers) {
+    if (!layer.isAnimating || layer.isAnimating()) return true
+  }
+  return false
 }

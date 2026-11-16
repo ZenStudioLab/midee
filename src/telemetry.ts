@@ -19,7 +19,7 @@ let ph: PostHog | null = null
 let phLoadFailed = false
 const queue: Array<(client: PostHog) => void> = []
 
-// Drain any calls made while the SDK was still loading. Order matters —
+// Drain any calls made while the SDK was still loading. Order matters -
 // `register*` should land before any `capture` that depends on those props.
 // If the SDK never loads (CSP, ad-blocker, offline), we drop the call rather
 // than grow the queue unbounded.
@@ -53,6 +53,26 @@ export function track(event: string, properties?: Record<string, unknown>): void
   enqueue((client) => client.capture(event, properties))
 }
 
+// The GPU as WebGL names it ("ANGLE (Intel, Intel(R) UHD Graphics 620 …)",
+// "Apple GPU", …): what tells slow exports apart in the field (integrated vs
+// discrete, vendor). Probed once on a throwaway context, then released;
+// 'unknown' where the debug extension is withheld (Firefox, some privacy modes).
+let gpuName: string | undefined
+export function webglRendererName(): string {
+  if (gpuName !== undefined) return gpuName
+  gpuName = 'unknown'
+  try {
+    const probe = document.createElement('canvas')
+    const gl = probe.getContext('webgl2') ?? probe.getContext('webgl')
+    const dbg = gl?.getExtension('WEBGL_debug_renderer_info')
+    if (gl && dbg) gpuName = String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)).slice(0, 120)
+    gl?.getExtension('WEBGL_lose_context')?.loseContext()
+  } catch {
+    // leave 'unknown'
+  }
+  return gpuName
+}
+
 // High-frequency controls (volume/speed/zoom/bpm sliders) would otherwise fire
 // one event per tick of a drag. Coalesce per event name: only the final value
 // after the user stops moving is sent. Keyed by event name, so distinct
@@ -77,7 +97,7 @@ export function trackSettled(event: string, properties: Record<string, unknown>,
 // us tie which pieces drive retention; nullable fields are always present so
 // the schema never varies.
 export function trackMidiLoaded(p: {
-  source: 'drag' | 'picker' | 'sample'
+  source: 'drag' | 'picker' | 'sample' | 'recent'
   target?: 'play' | 'learn'
   trackCount: number
   noteCount: number
@@ -216,13 +236,64 @@ export function categorizeMidiDevice(name: string): string {
   return 'other'
 }
 
+// ── Export crash forensics ─────────────────────────────────────────────────
+// A tiny in-flight marker persisted during export and cleared on any handled
+// terminal event (completed / failed / cancelled). If it's still present on
+// the next boot, the export died unhandled — OOM, tab kill, browser crash -
+// and we fire `export_interrupted` with the last known stage/pct.
+
+const EXPORT_INFLIGHT_KEY = 'midee.export.inflight'
+
+export interface ExportInflightMarker {
+  stage: string
+  pct: number
+  output: string
+  resolution: string
+  fps: number
+  ts: number
+  // 'opfs' | 'memory' once the attempt's output sink is open. Absent in
+  // markers written before it existed.
+  sink?: string | null
+}
+
+export function markExportInflight(marker: ExportInflightMarker): void {
+  try {
+    localStorage.setItem(EXPORT_INFLIGHT_KEY, JSON.stringify(marker))
+  } catch {
+    // localStorage unavailable — forensics degrade silently, export unaffected.
+  }
+}
+
+export function clearExportInflight(): void {
+  try {
+    localStorage.removeItem(EXPORT_INFLIGHT_KEY)
+  } catch {
+    // ignore
+  }
+}
+
+// Call once at boot. Returns the stale marker (and clears it) if the previous
+// session died mid-export; the caller fires the typed event.
+export function consumeInterruptedExport(): ExportInflightMarker | null {
+  try {
+    const raw = localStorage.getItem(EXPORT_INFLIGHT_KEY)
+    if (!raw) return null
+    localStorage.removeItem(EXPORT_INFLIGHT_KEY)
+    const parsed = JSON.parse(raw) as ExportInflightMarker
+    if (typeof parsed.stage !== 'string' || typeof parsed.pct !== 'number') return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
 // ── Typed event registry ──────────────────────────────────────────────────
 // New code should emit events through `trackEvent` so the name and property
 // shape stay in lockstep. Free-form `track()` stays for one-offs and legacy
 // callsites during migration. Additive-only: removing an entry here is a
 // breaking change for any PostHog dashboard keyed on it.
 
-// Add new entries here only when wiring the firing site in the same change —
+// Add new entries here only when wiring the firing site in the same change -
 // a declared-but-never-fired event is dashboard debt. Planned-but-unwired
 // events live in docs/LEARN_MODE_PLAN_V2.md until they're actually emitted.
 type EventMap = {
@@ -265,21 +336,75 @@ type EventMap = {
   volume_changed: { volume: number }
   zoom_changed: { zoom: number }
   tempo_changed: { bpm: number }
+  // Playback transpose in semitones (-12..12). Settled like the other
+  // *_changed controls: the HUD stepper is click-repeatable, so a walk from
+  // 0 to +5 should report one event carrying +5, not five events.
+  transpose_changed: { semitones: number }
   metronome_toggled: { on: boolean }
 
-  // Customization. instrument_changed now carries `method` so cycle-button and
-  // menu-pick paths are distinguishable (cycling was previously untracked).
-  theme_changed: { theme: string }
-  particle_changed: { style: string }
+  // Customization. `method` distinguishes the topbar cycle button from a menu
+  // pick. `theme` is the display name (kept for existing filters); `theme_id`
+  // is the stable persisted id.
+  theme_changed: { theme: string; theme_id: string; method: 'cycle' | 'menu' }
+  particle_changed: { style: string; method: 'cycle' | 'menu' }
   instrument_changed: { from: string | undefined; to: string; method: 'cycle' | 'menu' }
+  // Live commands, split by how they were invoked. The Shift+letter shortcuts
+  // and the HUD buttons call the same handlers, so nothing previously recorded
+  // which one people actually use — the question that decides whether the
+  // Shift command layer is worth keeping.
+  live_action: {
+    action: 'record' | 'loop_toggle' | 'loop_undo' | 'loop_clear' | 'metronome'
+    method: 'shortcut' | 'button'
+  }
   track_toggled: { enabled: boolean }
+
+  // One per parsed user file: what the source actually contains versus what
+  // midee currently models. Answers "how common are out-of-range pitches,
+  // pedalled files, and tempo maps in real uploads?" — the counters that
+  // prioritise the MIDI-fidelity work (docs/MIDI_FIDELITY_PLAN_2026-08-30.md).
+  midi_parse_quality: {
+    target: 'play' | 'learn'
+    out_of_range_notes: number
+    has_sustain_pedal: boolean
+    tempo_events: number
+  }
 
   // Previously-silent failure paths now surfaced as first-class events.
   synth_load_failed: { source: string }
   sample_load_failed: { sample_id: string; target: 'play' | 'learn' }
-  // A non-fatal export degradation: audio render failed but the (video-only /
-  // av) export continued without sound. Distinct from export_failed.
-  export_degraded: { stage: 'audio_render'; output: string }
+  // A recent card was clicked but the stored bytes were gone or unparseable —
+  // the entry is dropped, so this is the only trace it ever existed.
+  recent_load_failed: { target: 'play' | 'learn' }
+  // A non-fatal export degradation: the soundtrack was lost (render failed, or
+  // no AAC encoder / the encode failed) but the export continued without
+  // sound. Distinct from export_failed.
+  export_degraded: { stage: 'audio_render' | 'audio_encode'; output: string }
+  // Mid-export hardware-encoder failure recovered by the software retry
+  // (see VideoExporter's codec plan ladder). High volume here = a platform
+  // where 'prefer-hardware' probes pass but the encoder dies at runtime.
+  export_fallback: {
+    from_codec: string
+    to_codec: string
+    error_name: string
+    output: string
+    resolution: string
+    fps: number
+  }
+  // An export that started but never reached completed/failed/cancelled -
+  // detected on the NEXT boot via the localStorage in-flight marker below.
+  // This is the OOM / tab-kill bucket that used to be invisible (~7% of
+  // export_started had no terminal event).
+  export_interrupted: {
+    stage: string
+    pct: number
+    output: string
+    resolution: string
+    fps: number
+    age_s: number
+    // Where the MP4 was being assembled: 'memory' deaths are the OOM
+    // suspects the OPFS sink exists for; null = before the sink opened.
+    output_sink: string | null
+  }
 }
 
 export type EventName = keyof EventMap

@@ -50,6 +50,13 @@
   --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
+html:lang(zh-CN) {
+  --font:
+    "Inter", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+    "Source Han Sans SC", system-ui, sans-serif;
+  --font-display: "Noto Serif SC", "Songti SC", "STSong", "Source Han Serif SC", ui-serif, serif;
+}
+
 html,
 body {
   width: 100%;
@@ -73,6 +80,33 @@ body {
   width: 100vw;
   height: 100svh;
   min-height: 100vh;
+}
+
+/* A keyboard-only route past the top strip, without adding landing chrome. */
+.skip-link {
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  z-index: 10000;
+  transform: translateY(calc(-100% - 24px));
+  padding: 10px 16px;
+  border: 1px solid var(--accent);
+  border-radius: var(--r-md);
+  background: var(--surface-hi);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.skip-link:focus {
+  transform: translateY(0);
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+/* #app is a fallback focus destination while a mode is mounting. */
+#app:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 #pianoroll {
@@ -277,6 +311,20 @@ body {
   width: 100%;
 }
 
+/* Each grid cell wraps its card so the recent-card dismiss button has a
+   positioning context outside the card's own <button> (nesting buttons is
+   invalid HTML and breaks keyboard traversal). */
+.sample-card-slot {
+  position: relative;
+  display: flex;
+  min-width: 0;
+}
+
+.sample-card-slot > .sample-card {
+  flex: 1;
+  min-width: 0;
+}
+
 /* Sample cards — static poster with a pitch-density sparkline across the top
    and metadata below. No hover animation; the "wow" happens on click. */
 .sample-card {
@@ -446,6 +494,76 @@ body {
   font-size: 10.5px;
   color: var(--text-muted);
   letter-spacing: 0.01em;
+}
+
+/* Recent cards — the user's own files. They keep the app accent (samples carry
+   their own per-piece colour) and lift it only in the border, so the row reads
+   as "yours first, demos after" without a second visual language. The resting
+   glow is deliberately faint; `.sample-card:hover` still wins on specificity
+   and takes over from here. */
+.sample-card--recent {
+  border-color: color-mix(in srgb, var(--accent) 46%, transparent);
+  box-shadow: 0 0 14px -6px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.sample-card-tag {
+  align-self: flex-start;
+  margin-bottom: 3px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--accent) 55%, #fff);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+/* Dismiss affordance. Hidden until the slot is hovered so the resting card
+   stays as calm as a sample card. */
+.sample-card-forget {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(10, 10, 18, 0.72);
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transform: scale(0.85);
+  transition:
+    opacity 0.15s,
+    transform 0.15s var(--ease-spring),
+    color 0.15s,
+    border-color 0.15s;
+}
+
+.sample-card-slot:hover .sample-card-forget,
+.sample-card-forget:focus-visible {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.sample-card-forget:hover {
+  color: var(--text);
+  border-color: rgba(255, 255, 255, 0.22);
+}
+
+/* No hover on touch — without this the only way to drop a recent would be
+   invisible. */
+@media (pointer: coarse) {
+  .sample-card-forget {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .home-actions {
@@ -624,9 +742,9 @@ body {
    ≤519     Separator hides; pills/strip pack tighter for ≥360px phones
 
    Selector convention:
-   - Hide LABEL spans only via `> span + span` (second/text span)
-   - The icon span (`> span:first-child`, holds inline SVG) always stays
-   - This avoids the prior bug where `.ts-pill > span:not(.icon-slot)`
+   — Hide LABEL spans only via `> span + span` (second/text span)
+   — The icon span (`> span:first-child`, holds inline SVG) always stays
+   — This avoids the prior bug where `.ts-pill > span:not(.icon-slot)`
      hid the icon-bearing span too, leaving empty pill boxes
 ────────────────────────────────────────────────────────────────────────── */
 
@@ -754,7 +872,7 @@ body {
   }
 }
 
-/* Phones (≥360px target). Pack tighter, drop the action-group separator —
+/* Phones (≥360px target). Pack tighter, drop the action-group separator -
    at this width the visual grouping it provided is irrelevant; horizontal
    space is the priority. */
 @media (max-width: 519px) {
@@ -882,6 +1000,12 @@ body {
   opacity: 0.16;
   pointer-events: none;
 }
+/* A coachmark pointing at a dimmed strip would be pointing at a ghost; wake
+   the strip for as long as the bubble is up. */
+body.coachmark-open #top-strip.strip--dim {
+  opacity: 1;
+  pointer-events: auto;
+}
 
 .ts-end {
   display: flex;
@@ -895,19 +1019,26 @@ body {
    their labels would clip the centered Now-Playing title. The decision is
    content-driven (not a fixed width breakpoint): Controls runs a ResizeObserver
    that toggles `.ts-compact` on #top-strip when the title clips — see
-   Controls.evaluateCompact(). Export, the instrument selector, MIDI, and the
-   mode switch always keep their labels; the full title is available via the
-   native hover tooltip. Label span is the SECOND child (`> span + span`);
-   the first child holds the icon SVG and stays. */
+   Controls.evaluateCompact(). Every label collapses (export and MIDI included)
+   so the cluster fits in more cases and the strip stops overflowing its right
+   edge — which otherwise clips the right-most pills off-screen. Appearance is
+   pinned left-of-cluster (see ControlsView ts-customize-slot) so it survives
+   even when the row still overflows. The instrument selector and mode switch
+   keep their labels, and Export (the star action) only collapses in a second
+   tier (.ts-compact-export) when the first tier still clips.
+   Label span is the SECOND child (`> span + span`); the first holds the icon. */
 #top-strip.ts-compact #ts-open > span + span,
 #top-strip.ts-compact #ts-tracks > span + span,
 #top-strip.ts-compact #ts-learn-this > span + span,
+#top-strip.ts-compact-export #ts-record > span + span,
+#top-strip.ts-compact .ts-midi-label,
 #top-strip.ts-compact .ts-customize-label {
   display: none;
 }
 #top-strip.ts-compact #ts-open,
 #top-strip.ts-compact #ts-tracks,
-#top-strip.ts-compact #ts-learn-this {
+#top-strip.ts-compact #ts-learn-this,
+#top-strip.ts-compact-export #ts-record {
   padding: 0 10px;
   gap: 0;
 }
@@ -960,6 +1091,10 @@ body {
    hides so both segments read as available. */
 .ts-mode-switch {
   position: relative;
+  /* Segments size to their own label (content width), so the switch stays
+     compact and reads naturally in every locale. The sliding thumb can't use
+     static thirds then — its width + offset are measured from the active
+     segment in JS (see positionModeThumb in ControlsView). */
   display: inline-flex;
   align-items: center;
   height: 32px;
@@ -1034,11 +1169,13 @@ body {
   position: absolute;
   top: 3px;
   bottom: 3px;
-  left: 3px;
-  /* Three segments now (Play / Live / Learn). The thumb is one-third of the
-     available width (minus the 3px left inset that applies only once). Each
-     active state translates by a full segment width. */
-  width: calc((100% - 6px) / 3);
+  /* width + translateX are set in JS to match the active segment's measured
+     size/offset (segments are content-width, not equal thirds). Defaults here
+     are just a pre-measure resting state. The `left` origin is 0 because the
+     measured offsetLeft already includes the track's 3px padding. */
+  left: 0;
+  width: 0;
+  transform: translateX(3px);
   border-radius: var(--r-pill);
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.08));
   box-shadow:
@@ -1049,22 +1186,8 @@ body {
   pointer-events: none;
   transition:
     transform 0.26s var(--ease-spring),
+    width 0.26s var(--ease-spring),
     opacity 0.18s var(--ease-out);
-}
-
-.ts-mode-switch[data-active="play"] .ts-mode-thumb {
-  opacity: 1;
-  transform: translateX(0);
-}
-
-.ts-mode-switch[data-active="live"] .ts-mode-thumb {
-  opacity: 1;
-  transform: translateX(100%);
-}
-
-.ts-mode-switch[data-active="learn"] .ts-mode-thumb {
-  opacity: 1;
-  transform: translateX(200%);
 }
 
 /* ─────────────────────────────────────────
@@ -1231,6 +1354,7 @@ body {
   grid-template-columns: 60px 1fr auto;
   align-items: center;
   gap: 20px;
+  width: 100%;
   padding: 22px 24px;
   border-radius: 18px;
   border: 1px solid var(--border);
@@ -1280,70 +1404,55 @@ body {
   margin: 0;
   max-width: 520px;
 }
-.hero-card__hint {
-  font: 400 12px / 1.4 var(--font);
-  color: color-mix(in srgb, var(--accent) 70%, var(--text-muted));
-  margin: 4px 0 0;
-}
 .hero-card__actions {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
   gap: 8px;
 }
-.hero-card__primary {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  padding: 11px 18px;
-  border-radius: 999px;
-  background: var(--accent);
-  color: #0a0a14;
-  border: none;
-  font: 600 13px / 1 var(--font);
+/* The hero card is itself the button. The corner icon is the affordance. */
+.hero-card--clickable {
   cursor: pointer;
-  box-shadow:
-    0 10px 30px -8px color-mix(in srgb, var(--accent) 60%, transparent),
-    0 1px 0 rgba(255, 255, 255, 0.3) inset;
   transition:
     transform 0.15s var(--ease-spring),
-    filter 0.15s ease,
+    border-color 0.15s ease,
     box-shadow 0.2s ease;
 }
-.hero-card__primary:hover {
-  filter: brightness(1.08);
-  transform: translateY(-1px);
+.hero-card--clickable:hover {
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
   box-shadow:
-    0 14px 34px -8px color-mix(in srgb, var(--accent) 70%, transparent),
-    0 1px 0 rgba(255, 255, 255, 0.3) inset;
+    0 1px 0 rgba(255, 255, 255, 0.05) inset,
+    0 18px 42px rgba(0, 0, 0, 0.28);
 }
-.hero-card__primary:active {
-  transform: translateY(0) scale(0.98);
+.hero-card--clickable:active {
+  transform: translateY(0) scale(0.995);
 }
-.hero-card__primary-icon {
+.hero-card--clickable:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  outline-offset: 3px;
+}
+/* Circular accent affordance in the corner — reads as "go". */
+.hero-card__cue-icon {
   display: inline-flex;
   align-items: center;
-}
-.hero-card__secondary {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 12px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid var(--border);
-  color: var(--text-muted);
-  font: 600 11.5px / 1 var(--font);
-  cursor: pointer;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
   transition:
-    color 0.15s ease,
     background 0.15s ease,
-    border-color 0.15s ease;
+    transform 0.15s var(--ease-spring);
 }
-.hero-card__secondary:hover {
-  color: var(--text);
-  background: rgba(255, 255, 255, 0.08);
-  border-color: var(--border-hi);
+.hero-card__cue-icon svg {
+  width: 16px;
+  height: 16px;
+}
+.hero-card--clickable:hover .hero-card__cue-icon {
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+  transform: scale(1.06);
 }
 
 /* ─── Samples strip inside Learn hub ─────────────────────── */
@@ -1429,28 +1538,30 @@ body {
 /* Play-Along HUD. Uses FloatingHud for the outer pill, drag/pin/idle.
    Overrides width + padding; wraps content in a two-row grid. */
 .float-hud.pa-hud {
-  width: min(720px, calc(100vw - 24px));
+  /* Sizes to content so the score can grow without squeezing the scrubber,
+     which is pinned below. Switches to a definite width under 900px, where the
+     viewport caps the HUD and the bar has to flex instead. */
+  width: max-content;
+  max-width: min(880px, calc(100vw - 24px));
   height: auto;
   padding: 10px 14px 12px 0;
   align-items: flex-start;
-}
-
-/* Suppress the generic float-hud__sep; handle's border-right already separates. */
-.float-hud.pa-hud > .float-hud__sep {
-  display: none;
 }
 
 /* Two-row grid: [transport | meta] on row 1, [options] spanning row 2.
    `minmax(0, 1fr)` prevents the scrubber from refusing to shrink. */
 .pa-hud__body {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  /* Both tracks size to content; the HUD grows to fit them. A `1fr` transport
+     track instead handed every pixel the score gained straight to the
+     scrubber. */
+  grid-template-columns: auto auto;
   grid-template-rows: auto auto;
   grid-template-areas:
     "transport meta"
     "options   options";
   align-items: center;
-  column-gap: 12px;
+  column-gap: 8px;
   row-gap: 8px;
   flex: 1;
   min-width: 0;
@@ -1468,15 +1579,10 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
-  flex: 1;
+  /* Shrinkable, never growing: the wrap inside can only give ground if this
+     does too. */
+  flex: 0 1 auto;
   min-width: 0;
-}
-
-.pa-hud__meta {
-  grid-area: meta;
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
 }
 
 .pa-hud__options {
@@ -1488,6 +1594,31 @@ body {
   justify-content: center;
   padding-top: 6px;
   border-top: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.pa-hud__restart {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition:
+    color 0.12s ease,
+    transform 0.12s var(--ease-spring);
+}
+.pa-hud__restart:hover {
+  color: var(--text);
+  transform: scale(1.08);
+}
+.pa-hud__restart:active {
+  transform: scale(0.94);
 }
 
 .pa-hud__play {
@@ -1541,63 +1672,87 @@ body {
    flex slot the input used to occupy. */
 .pa-hud__scrubber-wrap {
   position: relative;
-  flex: 1 1 120px;
-  display: flex;
-  align-items: center;
+  /* Pinned: a flex-basis alone collapses here, because the absolutely
+     positioned input leaves this box with no in-flow content for the grid's
+     max-content pass. Released below 900px, where the HUD cannot grow. */
+  flex: 0 0 var(--pa-scrub-w, 260px);
+  /* Slider only; --loop adds a 12px rail below for the handles. The input is
+     absolutely placed so the handles can sit strictly BELOW its hit area — it
+     paints above the overlay, so anything overlapping it swallows the
+     pointerdown and turns a drag into a seek. */
+  height: 18px;
   min-width: 80px;
 }
 
-/* Loop band overlay. The slider's track is 4px tall, centered in an 18px
-   input; we draw an absolutely-positioned strip exactly on top. Two visual
-   states feed off the same ::before:
-     --loop : fill between A and B, plus a sharp 2px tick at B (A's tick is
-              drawn by ::after, shared with the half-set state).
-     --mark : no fill, just the A tick (waiting for B).
-   The slider's thumb sits in its own stacking context (z-index: 1 below) so
-   it stays interactive above the overlay. */
-.pa-hud__scrubber-wrap::before {
+/* Loop handles. A knob on a rail BELOW the slider, joined to the track by a
+   thin stem. The knob is the only interactive part and it sits entirely clear
+   of the input's 18px hit area — overlapping it would hand every press to the
+   slider (which paints above the overlay) and seek instead of dragging. */
+.pa-hud__loop-handle {
+  position: absolute;
+  top: 19px;
+  width: 14px;
+  height: 10px;
+  padding: 0;
+  background: var(--accent);
+  border: none;
+  cursor: ew-resize;
+  touch-action: none;
+}
+/* Stem up to the track, so the knob reads as attached to the loop edge rather
+   than floating. Decorative only. */
+/* Stem marks the exact edge time, and sits on whichever side of the knob the
+   region is — so the pair reads as a bracket around the loop. */
+.pa-hud__loop-handle::before {
   content: "";
   position: absolute;
-  inset: 0;
+  bottom: 100%;
+  width: 2px;
+  height: 12px;
+  background: var(--accent);
   pointer-events: none;
-  background: transparent;
-  border-radius: 999px;
 }
-.pa-hud__scrubber-wrap--loop::before {
-  background: /* B-edge tick — 1px hair, low-contrast. */
-    linear-gradient(
-      to right,
-      transparent calc(var(--loop-b-pct, 0%) - 0.5px),
-      color-mix(in srgb, #f3c36c 55%, transparent) calc(var(--loop-b-pct, 0%) - 0.5px),
-      color-mix(in srgb, #f3c36c 55%, transparent) calc(var(--loop-b-pct, 0%) + 0.5px),
-      transparent calc(var(--loop-b-pct, 0%) + 0.5px)
-    ),
-    /* Band between A and B — whisper-tint over the slider track only. */
-    linear-gradient(
-      to bottom,
-      transparent calc(50% - 2px),
-      color-mix(in srgb, #f3c36c 12%, transparent) calc(50% - 2px),
-      color-mix(in srgb, #f3c36c 12%, transparent) calc(50% + 2px),
-      transparent calc(50% + 2px)
-    ) var(--loop-a-pct, 0%) / calc(var(--loop-b-pct, 0%) - var(--loop-a-pct, 0%)) 100% no-repeat;
-}
-/* A-mark tick. Same hairline treatment for both --loop (left edge) and
-   --mark (half-set placeholder). 8px tall, no shadow — a hint, not a flag. */
-.pa-hud__scrubber-wrap--loop::after,
-.pa-hud__scrubber-wrap--mark::after {
+/* Enlarged grab area — a 14px knob is fine to look at, too small to hit. */
+.pa-hud__loop-handle::after {
   content: "";
   position: absolute;
-  top: 50%;
-  width: 1px;
-  height: 8px;
-  background: color-mix(in srgb, #f3c36c 55%, transparent);
-  transform: translate(-50%, -50%);
-  pointer-events: none;
+  inset: -7px -8px;
+}
+/* Anchored OUTWARD, not centred. Centring both on their own edge made them
+   overlap whenever the loop was short relative to the piece — a 4-bar seed is
+   ~4% of a 3-minute file, so two 14px knobs landed ~8px apart and merged into
+   one blob. Sitting outside the region they always read as a start and an end,
+   however narrow the loop gets, and the lit span between them stays visible. */
+.pa-hud__loop-handle--start {
   left: var(--loop-a-pct, 0%);
+  margin-left: -14px;
+  border-radius: 3px 0 0 3px;
+}
+.pa-hud__loop-handle--start::before {
+  right: 0;
+}
+.pa-hud__loop-handle--end {
+  left: var(--loop-b-pct, 0%);
+  border-radius: 0 3px 3px 0;
+}
+.pa-hud__loop-handle--end::before {
+  left: 0;
+}
+.pa-hud__loop-handle:hover,
+.pa-hud__loop-handle:active {
+  background: color-mix(in srgb, var(--accent) 75%, #fff);
+}
+.pa-hud__loop-handle:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .pa-hud__scrubber {
-  flex: 1 1 100%;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  width: 100%;
   appearance: none;
   -webkit-appearance: none;
   background: transparent;
@@ -1627,6 +1782,55 @@ body {
     rgba(255, 255, 255, 0.1) 100%
   );
 }
+/* Outside the loop is dimmed on the track itself — one gradient, no overlay
+   elements, so nothing can fight the slider for paint order or swallow its
+   pointer events. Only applies while a loop is active. */
+.pa-hud__scrubber-wrap--loop {
+  height: 30px;
+}
+
+.pa-hud__scrubber-wrap--loop .pa-hud__scrubber::-webkit-slider-runnable-track {
+  background:
+    linear-gradient(
+      to right,
+      rgba(6, 6, 12, 0.68) 0,
+      rgba(6, 6, 12, 0.68) var(--loop-a-pct, 0%),
+      transparent var(--loop-a-pct, 0%),
+      transparent var(--loop-b-pct, 100%),
+      rgba(6, 6, 12, 0.68) var(--loop-b-pct, 100%),
+      rgba(6, 6, 12, 0.68) 100%
+    ),
+    linear-gradient(
+      to right,
+      var(--accent) 0%,
+      var(--accent) var(--pct, 0%),
+      rgba(255, 255, 255, 0.1) var(--pct, 0%),
+      rgba(255, 255, 255, 0.1) 100%
+    );
+}
+/* Firefox needs its own rule, NOT a shared selector list: a list containing an
+   unknown pseudo-element is discarded wholesale, which is how the dimming
+   silently never applied anywhere. */
+.pa-hud__scrubber-wrap--loop .pa-hud__scrubber::-moz-range-track {
+  background:
+    linear-gradient(
+      to right,
+      rgba(6, 6, 12, 0.68) 0,
+      rgba(6, 6, 12, 0.68) var(--loop-a-pct, 0%),
+      transparent var(--loop-a-pct, 0%),
+      transparent var(--loop-b-pct, 100%),
+      rgba(6, 6, 12, 0.68) var(--loop-b-pct, 100%),
+      rgba(6, 6, 12, 0.68) 100%
+    ),
+    linear-gradient(
+      to right,
+      var(--accent) 0%,
+      var(--accent) var(--pct, 0%),
+      rgba(255, 255, 255, 0.1) var(--pct, 0%),
+      rgba(255, 255, 255, 0.1) 100%
+    );
+}
+
 .pa-hud__scrubber::-webkit-slider-thumb {
   appearance: none;
   -webkit-appearance: none;
@@ -1714,7 +1918,7 @@ body {
   filter: brightness(1.06);
 }
 
-/* Icon + label pill (Wait / Ramp / Loop). Off = quiet outline, on = accent. */
+/* Icon + label pill (Wait / Loop). Off = quiet outline, on = accent. */
 .pa-hud__pill {
   display: inline-flex;
   align-items: center;
@@ -1753,68 +1957,110 @@ body {
   color: var(--text-dim);
   letter-spacing: 0.02em;
   font-variant-numeric: tabular-nums;
+  /* Reserved for "99.9s". The loop duration updates on every pointermove while
+     a handle is dragged, so an auto-width box would shove the whole options row
+     throughout the gesture. Past 99.9s it may widen — acceptable, that is a
+     loop nobody is trimming by hand. Set smaller than the pill label: it is a
+     readout hanging off the action, not part of it. */
+  font-size: 9.5px;
+  min-width: 4.6ch;
+  text-align: right;
 }
 
-/* Loop pill + attached clear button. The pill cycles through three states
-   driven by the mark-style UX:
-     idle              → "Loop"
-     half-marked (A)   → "Mark B" (amber tint, gentle pulse)
-     active (A→B set)  → "Loop · Ns" (amber tint, ×-clear visible)
-   Clear button shows in either non-idle state so the user can bail without
-   placing a second mark. */
-.pa-hud__loop {
+/* The loop pill carries the most content of any pill (glyph + label + a live
+   readout + an attached x), so it runs tighter than its siblings. */
+.pa-hud__pill--loop {
+  gap: 5px;
+  padding: 6px 9px;
+}
+
+/* Attached x on an active loop pill: the pill restarts, this clears. */
+.pa-hud__loop-clear {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
-}
-.pa-hud__loop--on .pa-hud__pill--loop,
-.pa-hud__loop--mark .pa-hud__pill--loop {
-  border-top-right-radius: 0;
-  border-bottom-right-radius: 0;
-}
-.pa-hud__loop--mark .pa-hud__pill--loop {
-  /* Amber tint + slow pulse — half-set state is "you owe me a B". */
-  background: color-mix(in srgb, #f3c36c 18%, transparent);
-  border-color: color-mix(in srgb, #f3c36c 50%, transparent);
-  animation: pa-hud-loop-pulse 1.4s ease-in-out infinite;
-}
-@keyframes pa-hud-loop-pulse {
-  0%,
-  100% {
-    box-shadow: 0 0 0 0 color-mix(in srgb, #f3c36c 0%, transparent);
-  }
-  50% {
-    box-shadow: 0 0 0 3px color-mix(in srgb, #f3c36c 18%, transparent);
-  }
-}
-.pa-hud__loop-clear {
-  display: none;
-  align-items: center;
   justify-content: center;
-  width: 26px;
+  width: 24px;
   height: 28px;
   padding: 0;
-  color: var(--text-muted);
-  background: color-mix(in srgb, var(--accent) 18%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
+  margin-left: -1px;
+  /* Matches the pill it is welded to, now that the pill is no longer accented.
+     Turns accent only on hover — clearing a loop is destructive and has no
+     undo, so the warning belongs at the moment of reaching for it. */
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid var(--border);
   border-left: none;
-  border-top-right-radius: 999px;
-  border-bottom-right-radius: 999px;
+  border-radius: 0 999px 999px 0;
   cursor: pointer;
   transition:
     color 0.15s ease,
     background 0.15s ease;
 }
-.pa-hud__loop--on .pa-hud__loop-clear,
-.pa-hud__loop--mark .pa-hud__loop-clear {
-  display: inline-flex;
-}
 .pa-hud__loop-clear:hover {
   color: var(--text);
-  background: color-mix(in srgb, var(--accent) 28%, transparent);
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.pa-hud__loop-clear:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+/* Square off the pill's right edge so the two read as one control. */
+.pa-hud__loop--on .pa-hud__pill--loop {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
 }
 
-/* Icon-only buttons (close / clear loop). */
+/* Loop pill. Two states only:
+     idle   → "Loop"
+     active → "Clear loop · Ns" (amber tint)
+   Trimming happens on the bar via the bracket handles, so the pill never has
+   to describe a half-finished marking sequence. */
+/* Cycling speed chip. Fixed width sized for the widest label ("100%") so
+   cycling never resizes the chip and shifts the controls beside it. */
+.pa-hud__speed-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 28px;
+  flex-shrink: 0;
+  font: 600 11.5px / 1 var(--font);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  background: none;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease,
+    color 0.12s ease;
+}
+.pa-hud__speed-chip:hover {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.16);
+  color: var(--text);
+}
+.pa-hud__speed-chip:active {
+  transform: scale(0.95);
+}
+.pa-hud__speed-chip:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+/* Slowed down is worth noticing at a glance — colour alone carries it. */
+.pa-hud__speed-chip.is-off {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.pa-hud__loop {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+/* Icon-only buttons (close). */
 .pa-hud__icon-btn {
   display: inline-flex;
   align-items: center;
@@ -1842,9 +2088,6 @@ body {
   height: 22px;
   border-radius: 6px;
 }
-.pa-hud__close {
-  margin-left: auto;
-}
 
 /* Live stats panel — always visible during play. Two tiers:
      primary (streak + accuracy) — always shown, the headline numbers.
@@ -1855,6 +2098,8 @@ body {
 .pa-hud__stats {
   display: inline-flex;
   align-items: center;
+  grid-area: meta;
+  margin-left: 2px;
   gap: 8px;
   font: 600 12px / 1 var(--font);
   color: var(--text);
@@ -1886,14 +2131,28 @@ body {
   justify-content: center;
 }
 
+/* Zero streak: present, but clearly not a streak yet. */
+.pa-hud__stat--streak.is-cold {
+  color: var(--text-dim);
+  opacity: 0.5;
+}
+.pa-hud__stat--streak.is-cold .pa-hud__stat-glyph {
+  filter: grayscale(1);
+}
+
 .pa-hud__stat-num {
   font: 600 12px / 1 var(--font);
+  /* Two digits reserved so a streak resetting 12 -> 0 does not resize the
+     chip. */
   font-variant-numeric: tabular-nums;
+  min-width: 2ch;
+  text-align: right;
 }
 
 .pa-hud__stat-unit {
   font: 500 11px / 1 var(--font);
   color: var(--text-muted);
+  margin-left: -2px;
 }
 
 /* Streak heat: cold = hidden by JSX, warm = amber tint, hot = brighter
@@ -1920,8 +2179,23 @@ body {
 .pa-hud__stats-breakdown {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding-left: 6px;
+  gap: 0;
+  font-variant-numeric: tabular-nums;
+  /* One chip with three sections: the counters are a single reading, not three
+     controls. */
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.025);
+  overflow: hidden;
+}
+.pa-hud__stats-breakdown .pa-hud__stat {
+  padding: 4px 8px;
+  gap: 3px;
+  background: none;
+  border: none;
+  border-radius: 0;
+}
+.pa-hud__stats-breakdown .pa-hud__stat + .pa-hud__stat {
   border-left: 1px solid var(--border);
 }
 
@@ -1986,6 +2260,53 @@ body {
      screen. */
   .pa-hud__stats-breakdown {
     display: none;
+  }
+
+  /* The transport row has hard floors (two 38px time readouts that refuse to
+     shrink, plus an 80px scrubber). Once their total exceeds the 1fr track,
+     grid lets the content overflow the track rather than clip it, so the
+     transport spills into the meta column and lands under the streak chip.
+     Total duration is the one thing here that never changes during a session,
+     so it sheds first — the scrubber still shows position. */
+  .pa-hud__time--muted {
+    display: none;
+  }
+}
+
+@media (max-width: 900px) {
+  /* The viewport caps the HUD here, so a pinned bar would overflow the panel
+     and paint through the score. Both levels have to be released — and the
+     width must become DEFINITE at the same time, since a content-sized
+     container gives a flexible child nothing to fill. */
+  .float-hud.pa-hud {
+    width: min(calc(100vw - 24px), 880px);
+  }
+  .pa-hud__scrub {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .pa-hud__scrubber-wrap {
+    flex: 1 1 56px;
+    /* Low enough for phone widths, where the duration and breakdown are
+       already hidden. */
+    min-width: 44px;
+    /* Never wider than the pinned size, so the bar matches across the
+       breakpoint. */
+    max-width: var(--pa-scrub-w, 260px);
+  }
+}
+
+@media (max-width: 440px) {
+  /* Past here they genuinely do not fit on one line, so the score gets its own
+     row rather than overlapping the transport. */
+  .pa-hud__body {
+    grid-template-areas:
+      "transport"
+      "meta"
+      "options";
+  }
+  .pa-hud__stats {
+    margin-left: 0;
   }
 }
 
@@ -2556,6 +2877,62 @@ body {
   white-space: nowrap;
 }
 
+/* Sustain-pedal light beside the title. Reads as a status lamp, like the
+   mode dot: dim outline while the pedal is up, accent-filled foot with a
+   soft glow while it is down. Press is snappy, release eases out like a
+   damper lifting, and each press rings once (the dot-pulse motif). */
+.ts-pedal {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  margin-left: 6px;
+  border-radius: 50%;
+  color: var(--text-dim);
+  cursor: default;
+  transition: color 0.26s var(--ease-out);
+}
+.ts-pedal svg {
+  display: block;
+  transition:
+    transform 0.14s var(--ease-spring),
+    filter 0.26s var(--ease-out);
+}
+.ts-pedal .ts-pedal-foot {
+  fill: currentColor;
+  fill-opacity: 0;
+  transition: fill-opacity 0.26s var(--ease-out);
+}
+.ts-pedal[data-down] {
+  color: var(--accent);
+  transition-duration: 0.06s;
+  animation: pedal-press 0.5s var(--ease-out) 1;
+}
+.ts-pedal[data-down] svg {
+  transform: translateY(1px);
+  filter: drop-shadow(0 0 5px var(--accent-glow));
+  transition-duration: 0.06s;
+}
+.ts-pedal[data-down] .ts-pedal-foot {
+  fill-opacity: 1;
+  transition-duration: 0.06s;
+}
+@keyframes pedal-press {
+  from {
+    box-shadow: 0 0 0 0 var(--accent-soft);
+  }
+  to {
+    box-shadow: 0 0 0 7px transparent;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ts-pedal[data-down] {
+    animation: none;
+  }
+}
+
 /* Tiny equaliser bars inside the status when playing */
 .ts-bars {
   display: inline-flex;
@@ -2679,7 +3056,7 @@ body {
   display: none;
 }
 
-/* Collapse MIDI pill when the browser doesn't support Web MIDI at all —
+/* Collapse MIDI pill when the browser doesn't support Web MIDI at all -
    nothing the user can do, so we just disable it visually. */
 #top-strip[data-midi-status="unavailable"] .ts-pill--midi {
   opacity: 0.35;
@@ -2844,17 +3221,32 @@ body {
   background: rgba(7, 7, 15, 0.93);
   backdrop-filter: blur(48px) saturate(160%);
   -webkit-backdrop-filter: blur(48px) saturate(160%);
-  border: 1px solid var(--border);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 20px;
+  /* Raised "polished glass": soft drop shadow lifts it off the canvas, a bright
+     top sheen + a darker bottom edge give the pill a subtle bevel. */
   box-shadow:
     0 24px 64px rgba(0, 0, 0, 0.75),
     0 8px 24px rgba(0, 0, 0, 0.5),
-    inset 0 1px 0 rgba(255, 255, 255, 0.045);
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.4);
   transition: opacity 0.35s var(--ease-out, cubic-bezier(0.15, 0.88, 0.35, 1));
 }
 
-/* Idle: learn HUDs dim to 28%; main HUD (#hud) overrides to fully hide */
-.float-hud.float-hud--idle:not(.float-hud--pinned):not(.float-hud--dragging):not(:hover) {
+/* Top-anchored variant. MUST follow .float-hud: same specificity, so only the
+   later rule can clear the `bottom` set above — with both applied, an absolutely
+   positioned element stretches between the two edges instead of moving.
+   84px clears the top strip; keep in step with TOP_ANCHOR_Y in FloatingHud.tsx,
+   which the drag clamp uses. */
+.float-hud--top {
+  top: 84px;
+  bottom: auto;
+}
+
+/* Idle: learn HUDs dim to 28%; main HUD (#hud) overrides to fully hide.
+   Hover is handled in JS (idle is suppressed while pointing at the pill), so
+   the fade tracks idle() alone — keeping the HUD and top-strip dim in sync. */
+.float-hud.float-hud--idle:not(.float-hud--pinned):not(.float-hud--dragging) {
   opacity: 0.28;
 }
 
@@ -2875,16 +3267,7 @@ body {
   gap: 2px;
   padding: 0 4px 0 10px;
   border-right: 1px solid var(--border);
-  margin-right: 2px;
-  flex-shrink: 0;
-}
-
-/* Thin vertical separator between sections */
-.float-hud__sep {
-  width: 1px;
-  height: 20px;
-  background: var(--border);
-  margin: 0 12px;
+  margin-right: 8px;
   flex-shrink: 0;
 }
 
@@ -2907,7 +3290,7 @@ body {
 
 /* Main HUD idle: fully hide + slide down — learn HUDs only dim.
    Own transition so the slide only animates on idle-state change, not on drag. */
-#hud.hud--active.float-hud--idle:not(.float-hud--pinned):not(.float-hud--dragging):not(:hover) {
+#hud.hud--active.float-hud--idle:not(.float-hud--pinned):not(.float-hud--dragging) {
   opacity: 0;
   pointer-events: none;
   transform: translateX(calc(-50% + var(--hud-dx, 0px))) translateY(calc(var(--hud-dy, 0px) + 14px));
@@ -3000,6 +3383,176 @@ body {
   transform: rotate(-18deg);
 }
 .hud-pin-btn.hud-pin-btn--on:hover {
+  color: var(--accent);
+}
+
+/* Close (✕) button — collapses the whole HUD for the session. Sits at the
+   right edge of the pill, mirroring the pin button in the left handle cluster. */
+/* Circular ghost button — a recognizable "dismiss" affordance, set apart from
+   the square-ish controls. A faint disc + hairline ring give it presence at
+   rest without shouting; it lifts to a clearer button on hover. */
+.hud-close-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  width: 24px;
+  height: 24px;
+  margin-left: 8px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition:
+    color 0.15s,
+    background 0.15s,
+    border-color 0.15s,
+    transform 0.12s var(--ease-spring);
+}
+.hud-close-btn:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.1);
+  border-color: var(--border-hi);
+}
+.hud-close-btn:active {
+  transform: scale(0.9);
+}
+
+/* ── Collapsed HUD ────────────────────────────────────────────────
+   Closing shrinks the whole pill to a small draggable icon that keeps the
+   HUD's glass + drag offset. Used by the main HUD and both learn HUDs.
+   Everything except the reopen icon is hidden. */
+.float-hud--collapsed > *:not(.float-hud__reopen) {
+  display: none;
+}
+
+/* Shared collapsed look — faint accent edge + soft static glow, no animation.
+   Per-HUD selectors so each beats its own base sizing regardless of source
+   order (sr-hud's base rule sits later in this file). */
+#hud.float-hud--collapsed,
+.float-hud.pa-hud.float-hud--collapsed,
+.float-hud.sr-hud.float-hud--collapsed {
+  padding: 0;
+  gap: 0;
+  border-radius: 16px;
+  align-items: center;
+  justify-content: center;
+  border-color: rgba(249, 115, 22, 0.28);
+  box-shadow:
+    0 10px 26px rgba(0, 0, 0, 0.5),
+    0 0 12px rgba(249, 115, 22, 0.14);
+}
+.float-hud--collapsed:hover {
+  border-color: rgba(249, 115, 22, 0.5);
+}
+
+/* Main HUD collapses to a plain square icon. */
+#hud.float-hud--collapsed {
+  width: 46px;
+  min-width: 46px;
+  max-width: 46px;
+  height: 46px;
+}
+
+/* Learn HUDs collapse to a score chip that fits its content. */
+.float-hud.pa-hud.float-hud--collapsed,
+.float-hud.sr-hud.float-hud--collapsed {
+  width: auto;
+  min-width: 0;
+  max-width: max-content;
+  height: 44px;
+}
+
+/* The reopen control fills the collapsed pill — it's the drag surface and the
+   click-to-reopen target. Hidden until collapsed. */
+.float-hud__reopen {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  cursor: grab;
+  border-radius: inherit;
+  touch-action: none;
+  transition: color 0.15s;
+}
+.float-hud--collapsed .float-hud__reopen {
+  display: inline-flex;
+}
+.float-hud--collapsed.float-hud--dragging .float-hud__reopen {
+  cursor: grabbing;
+}
+.float-hud__reopen-icon {
+  display: inline-flex;
+  transition: transform 0.12s var(--ease-spring);
+}
+.float-hud__reopen:hover .float-hud__reopen-icon {
+  transform: scale(1.08);
+}
+/* Learn chip needs side padding to breathe; main icon stays centered. */
+.float-hud.pa-hud .float-hud__reopen,
+.float-hud.sr-hud .float-hud__reopen {
+  width: auto;
+  padding: 0 15px;
+}
+
+/* Collapsed learn score: reuse each exercise's own expanded stat styles so the
+   chip matches the bar exactly. Sight-reading just needs a layout wrapper. */
+.sr-hud__collapsed {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* Play-along collapsed readout — borderless inside the accent pill (no nested
+   chip borders), accuracy as the accent headline. */
+.pa-hud__mini {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.pa-hud__mini-restart {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition:
+    color 0.12s ease,
+    transform 0.12s var(--ease-spring);
+}
+.pa-hud__mini-restart:hover {
+  color: var(--text);
+  transform: scale(1.12);
+}
+.pa-hud__mini-restart:active {
+  transform: scale(0.92);
+}
+.pa-hud__mini-streak {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font: 600 13px / 1 var(--font);
+  color: var(--text-muted);
+}
+.pa-hud__mini-streak--hot {
+  color: #ffd166;
+}
+.pa-hud__mini-acc {
+  font: 700 14.5px / 1 var(--font);
   color: var(--accent);
 }
 
@@ -3225,8 +3778,29 @@ body {
   flex-shrink: 0;
 }
 
+/* Clickable variant (volume mute). Bare like the static icon — the row's
+   affordance convention is a hover highlight, not persistent chrome. */
+.ctrl-icon--btn {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  border-radius: var(--r-pill);
+  transition: color 0.12s ease;
+}
+.ctrl-icon--btn:hover {
+  color: var(--text);
+}
+.ctrl-icon--btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
 .ctrl-icon {
-  color: var(--text-dim);
+  /* Matches .speed-chip: volume / speed / zoom are peers in one cluster, so
+     they read at one contrast level. --text-dim left them visibly fainter
+     than the speed readout sitting between them. */
+  color: var(--text-muted);
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -3251,6 +3825,27 @@ body {
   transition:
     height 0.15s var(--ease-out),
     box-shadow 0.15s var(--ease-out);
+}
+
+/* Detent marker. Layered ABOVE the progress fill (first background wins), so
+   the default value is visible on the track instead of being a feel-it-out
+   spot the snap silently teleports you to. */
+.mini-slider--detent {
+  background:
+    linear-gradient(
+      to right,
+      transparent calc(var(--detent) - 1px),
+      rgba(255, 255, 255, 0.45) calc(var(--detent) - 1px),
+      rgba(255, 255, 255, 0.45) calc(var(--detent) + 1px),
+      transparent calc(var(--detent) + 1px)
+    ),
+    linear-gradient(
+      to right,
+      var(--accent) 0,
+      var(--accent) var(--pct, 0%),
+      rgba(255, 255, 255, 0.06) var(--pct, 0%),
+      rgba(255, 255, 255, 0.06) 100%
+    );
 }
 
 .mini-slider:hover {
@@ -3744,21 +4339,142 @@ body {
   background: var(--accent-soft);
 }
 
-.speed-val {
+/* Click-to-cycle speed readout (replaced a 60px slider: 36 steps of ~1.7px was
+   never a control anyone could aim). Deliberately styled as a .time-display
+   that happens to be clickable, but keeping the quiet 1px outline .hud-loop-btn
+   uses: in this bar, passive readouts (.time-display, .hud-metro-bpm) are bare
+   and interactive things are outlined. What it must NOT do is carry accent
+   chrome — the play button is the only element allowed to be loud. */
+.speed-chip {
   font-family: var(--font-mono);
   font-size: 10.5px;
   font-variant-numeric: tabular-nums;
   color: var(--text-muted);
-  min-width: 26px;
-  text-align: right;
+  /* Fixed, and sized for the widest label formatSpeed() emits ("0.25x") plus
+     padding, so cycling never resizes the box and shoves the HUD sideways. */
+  width: 6.5ch;
+  flex-shrink: 0;
+  text-align: center;
   letter-spacing: 0.02em;
+  padding: 3px 0;
+  background: none;
+  /* Same outline weight as .hud-loop-btn — enough to read as a control and to
+     hold its own edge against the volume slider next to it, quiet enough to
+     disappear into the bar at rest. */
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--r-pill);
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease,
+    color 0.12s ease;
+}
+.speed-chip:hover {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.16);
+  color: var(--text);
+}
+.speed-chip:active {
+  transform: scale(0.95);
+}
+.speed-chip:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+/* Off-default is worth noticing — you can leave it at 0.5x and wonder why
+   playback drags — but colour alone carries that. No border, no fill. */
+.speed-chip[data-off] {
+  color: var(--accent);
+}
+
+/* Transpose stepper — a discrete −/value/+ trio. Sized and coloured off the
+   metronome stepper (.hud-metro-step / .hud-metro-bpm) so the two read as the
+   same kind of control, and the value chip takes .speed-chip's off-default
+   accent so a non-zero transpose is noticeable at a glance. */
+/* Tighter than the 6px .ctrl-group default (and than the narrow-viewport
+   override further down, hence the extra specificity): −/value/+ is one
+   control, not three neighbours. */
+.hud-bar .ctrl-group.hud-transpose {
+  gap: 2px;
+}
+
+.hud-transpose-step {
+  width: 15px;
+  height: 22px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 6px;
+  transition:
+    color 0.12s,
+    background 0.12s,
+    transform 0.1s var(--ease-spring);
+}
+.hud-transpose-step:hover:not(:disabled) {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+}
+.hud-transpose-step:active:not(:disabled) {
+  transform: scale(0.9);
+}
+.hud-transpose-step:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+.hud-transpose-step:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.hud-transpose-val {
+  /* Fixed at the widest label ("−12") so stepping never resizes the HUD. */
+  width: 3ch;
+  padding: 3px 0;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  background: none;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--r-pill);
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease,
+    color 0.12s ease;
+}
+.hud-transpose-val:hover {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.16);
+  color: var(--text);
+}
+.hud-transpose-val:active {
+  transform: scale(0.95);
+}
+.hud-transpose-val:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.hud-transpose-val[data-off] {
+  color: var(--accent);
 }
 
 /* Disable controls during export */
 #hud.hud--exporting .btn-play,
 #hud.hud--exporting .btn-skip,
 #hud.hud--exporting .scrubber,
-#hud.hud--exporting .mini-slider {
+#hud.hud--exporting .mini-slider,
+#hud.hud--exporting .speed-chip,
+#hud.hud--exporting .hud-transpose-step,
+#hud.hud--exporting .hud-transpose-val,
+#hud.hud--exporting .ctrl-icon--btn {
   opacity: 0.25;
   pointer-events: none;
 }
@@ -3867,7 +4583,7 @@ body {
 }
 
 /* Shortcuts: wrapped row of small chord chips, each chip = one or more
-   keycaps + a label. Stacked layout means no special divider needed —
+   keycaps + a label. Stacked layout means no special divider needed -
    the section spacing alone separates regions. */
 .kh-shortcuts {
   /* Two-column grid keeps the chips on a stable rhythm — labels and caps
@@ -4621,11 +5337,14 @@ body.canvas-hidden #kbd-resizer {
 }
 
 .export-card {
+  /* Long side of the preview stage; the short side follows the aspect. */
+  --stage: 300px;
   background: var(--surface-hi);
   border: 1px solid var(--border-hi);
   border-radius: var(--r-xl);
-  padding: 28px 30px 24px;
-  width: 420px;
+  padding: 22px 24px 20px;
+  width: 720px;
+  max-width: 100%;
   box-shadow:
     0 32px 80px rgba(0, 0, 0, 0.75),
     inset 0 1px 0 rgba(255, 255, 255, 0.05);
@@ -4633,7 +5352,14 @@ body.canvas-hidden #kbd-resizer {
   transform: scale(0.94) translateY(8px);
   transition:
     opacity 0.28s var(--ease-out),
-    transform 0.28s var(--ease-out);
+    transform 0.28s var(--ease-out),
+    width 0.28s var(--ease-out);
+}
+/* Every settings tab shares one footprint (see .export-body); only the
+   progress/error phases shrink to a compact card. */
+.export-card[data-phase="progress"],
+.export-card[data-phase="error"] {
+  width: 420px;
 }
 
 #export-modal.open .export-card {
@@ -4658,26 +5384,6 @@ body.canvas-hidden #kbd-resizer {
 }
 
 /* Settings phase */
-.export-header {
-  display: flex;
-  align-items: flex-start;
-  gap: 14px;
-  margin-bottom: 22px;
-}
-
-.export-header-text {
-  flex: 1;
-  min-width: 0;
-}
-
-.export-card-icon {
-  color: var(--accent);
-  opacity: 0.88;
-  padding: 8px;
-  background: var(--accent-soft);
-  border-radius: var(--r-md);
-  display: inline-flex;
-}
 
 .export-card-title {
   font-size: 17px;
@@ -4685,159 +5391,6 @@ body.canvas-hidden #kbd-resizer {
   letter-spacing: -0.03em;
   color: var(--text);
   margin-bottom: 3px;
-}
-
-.export-card-sub {
-  font-size: 11.5px;
-  color: var(--text-muted);
-  line-height: 1.5;
-}
-
-.export-section {
-  margin-bottom: 18px;
-}
-
-.export-section-label {
-  display: block;
-  font-size: 11px;
-  font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--text-muted);
-  margin-bottom: 10px;
-}
-
-.export-section--disabled {
-  opacity: 0.35;
-  pointer-events: none;
-  filter: saturate(0.2);
-  transition:
-    opacity 0.2s,
-    filter 0.2s;
-}
-
-/* Segmented controls inside the export modal span full width with equal-sized
-   cells, so Output and Frame rate sit at the same visual weight under their
-   shared section-label style. */
-.export-section .fps-group {
-  width: 100%;
-}
-.export-section .fps-btn {
-  flex: 1;
-  padding: 6px 10px;
-}
-
-/* Resolution card grid — 3 columns × 2 rows, last row left-aligned. Each card
-   shows a tiny preview rectangle at the format's actual aspect ratio so the
-   picker reads visually before the dimensions do. */
-.res-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 8px;
-}
-
-.res-card {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  padding: 12px 8px 10px;
-  border-radius: var(--r-md);
-  border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--text-muted);
-  cursor: pointer;
-  transition:
-    color 0.15s,
-    background 0.15s,
-    border-color 0.15s,
-    transform 0.12s var(--ease-spring);
-}
-
-.res-card:hover {
-  color: var(--text);
-  background: rgba(255, 255, 255, 0.06);
-  border-color: var(--border-hi);
-}
-
-.res-card:active {
-  transform: scale(0.97);
-}
-
-.res-card.res-card--on {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-  color: var(--text);
-  box-shadow: inset 0 0 0 1px var(--accent);
-}
-
-.res-card-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: inherit;
-  letter-spacing: -0.01em;
-}
-
-.res-card-dim {
-  font-size: 10px;
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  color: var(--text-muted);
-  letter-spacing: 0.02em;
-}
-
-.res-card--on .res-card-dim {
-  color: var(--text);
-  opacity: 0.7;
-}
-
-/* Aspect-ratio preview rectangles. Each is centered in a 44×32 slot and sized
-   proportional to the target format — user scans the shape before reading. */
-.res-preview {
-  width: 100%;
-  height: 34px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin-bottom: 6px;
-}
-
-.res-preview::before {
-  content: "";
-  display: block;
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.02));
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 3px;
-  transition:
-    background 0.15s,
-    border-color 0.15s;
-}
-
-.res-card--on .res-preview::before {
-  background: linear-gradient(135deg, var(--accent), rgba(255, 255, 255, 0.06));
-  border-color: var(--accent);
-}
-
-.res-preview--landscape::before {
-  width: 50px;
-  height: 28px;
-}
-.res-preview--vertical::before {
-  width: 16px;
-  height: 28px;
-}
-.res-preview--square::before {
-  width: 28px;
-  height: 28px;
-}
-.res-preview--match::before {
-  width: 42px;
-  height: 28px;
-  border-style: dashed;
-  background: transparent;
-}
-.res-card--on .res-preview--match::before {
-  background: transparent;
 }
 
 /* FPS segmented control */
@@ -4885,6 +5438,506 @@ body.canvas-hidden #kbd-resizer {
 .fps-btn.fps-btn--on:hover {
   background: var(--accent);
   filter: brightness(1.1);
+}
+
+/* ── Export dialog: head, tabs, body ─────────────────────────────────── */
+/* The settings phase is a normal block; only progress/error centre. */
+.export-phase.export-settings {
+  display: block;
+}
+.export-head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+.export-head .export-card-title {
+  margin: 0;
+}
+.export-tabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+}
+.export-tab {
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 5px 14px;
+  border: none;
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition:
+    color 0.15s,
+    background 0.15s;
+}
+.export-tab:hover {
+  color: var(--text);
+}
+.export-tab--on {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.1);
+}
+.export-close {
+  margin-left: auto;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition:
+    color 0.15s,
+    background 0.15s;
+}
+.export-close:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+}
+.export-close svg {
+  display: block;
+}
+
+.export-body {
+  display: grid;
+  grid-template-columns: var(--stage) minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+
+/* Preview: the stage IS the frame — it takes the aspect of the chosen format
+   (16:9 / 9:16 / 1:1) and the canvas fills it edge to edge, so the left column
+   is exactly stage + caption and the card never carries dead space. Audio and
+   MIDI leave `data-aspect` off and get the 16:9 default. */
+/* Stage centred in its column (a 9:16 frame sits mid-column); caption keeps
+   the column's left edge. */
+.export-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+.export-preview .export-caption {
+  align-self: stretch;
+}
+.export-stage {
+  --stage-ar: 16 / 9;
+  --stage-w: var(--stage);
+  --stage-h: calc(var(--stage) * 9 / 16);
+  width: var(--stage-w);
+  height: var(--stage-h);
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-md);
+  background:
+    radial-gradient(60% 60% at 50% 40%, rgba(255, 255, 255, 0.035), transparent),
+    rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--border);
+}
+.export-stage[data-aspect="vertical"] {
+  --stage-ar: 9 / 16;
+  --stage-w: calc(var(--stage) * 9 / 16);
+  --stage-h: var(--stage);
+}
+.export-stage[data-aspect="square"] {
+  --stage-ar: 1 / 1;
+  --stage-w: var(--stage);
+  --stage-h: var(--stage);
+}
+.export-stage-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: calc(var(--r-md) - 1px);
+  background: #000;
+  opacity: 0;
+  transition: opacity 0.22s var(--ease-out);
+}
+.export-stage-canvas--ready {
+  opacity: 1;
+}
+/* Audio / MIDI thumbnails paint synchronously straight onto the stage
+   background — no black letterbox and no fade-in gate to wait on. */
+.export-stage-canvas--thumb {
+  background: transparent;
+  opacity: 1;
+}
+/* Two lines are always reserved: the time estimate only exists once this
+   device has measured an export, so its arrival must not move the card. */
+.export-caption {
+  margin: 0;
+  width: 100%;
+  min-height: 35px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  line-height: 16px;
+  overflow-wrap: anywhere;
+}
+.export-caption-time {
+  min-height: 16px;
+  color: var(--text-dim);
+}
+/* MIDI caption line 1: the piece name gives way before the duration does. */
+.export-caption-line {
+  display: flex;
+  min-width: 0;
+}
+.export-caption-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* MIDI tab: the stage is a file tile, not a picture. */
+.export-stage--file {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 0 20px;
+}
+.export-file-icon {
+  display: inline-flex;
+  color: var(--accent);
+  opacity: 0.9;
+}
+.export-file-name {
+  max-width: 100%;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.export-caption-sep {
+  margin: 0 5px;
+  flex-shrink: 0;
+}
+
+/* Settings rows: label above a full-width control. Nothing is pinned — the
+   card is as tall as its taller column — but all three tabs are BUILT to the
+   same 256px so switching tabs never resizes it. The budget, given the
+   explicit line-heights below (label 16, segmented button 18, toggle 18) and
+   the 14px row gap:
+     row          = 16 label + 7 + 38 segmented (18 + 12 pad + 6 pad + 2 border)  = 61
+     Video 16:9   = 61 + 61 + (61 + 7 + 24 toggle) + 3 × 14 gap                   = 256
+                    (the collapsed .export-social is 0 tall but still costs a gap)
+     Audio        = (16 + 7 + 53 choices) + 14 + (16 + 7 + 143 kv×3)              = 256
+     MIDI         =  16 + 7 + 233 kv×5                                            = 256
+     kv block     = rows × 45 + 6 padding + 2 border
+   The left column (stage 168.75 + 10 + 35 caption ≈ 214) always fits inside
+   that. Social formats slide Framing + Fall open on purpose — the card is
+   meant to grow for those. */
+.export-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+.export-row {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  transition: opacity 0.2s;
+}
+.export-row-label {
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+.export-row-note {
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+.export-row--off .export-seg {
+  opacity: 0.35;
+  filter: saturate(0.2);
+}
+.export-seg {
+  width: 100%;
+}
+/* Explicit line-height: buttons don't inherit the body's, and the row budget
+   above is only reliable if this height is a number we chose. */
+.export-seg .fps-btn {
+  flex: 1;
+  padding: 6px 8px;
+  line-height: 18px;
+}
+.export-seg .fps-btn:disabled {
+  cursor: default;
+}
+
+/* Include-audio switch, sits under the frame-rate control. */
+.export-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 2px 0;
+  border: none;
+  background: transparent;
+  font-family: var(--font);
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.15s;
+}
+.export-toggle:hover,
+.export-toggle--on {
+  color: var(--text);
+}
+.export-toggle-knob {
+  position: relative;
+  width: 26px;
+  height: 15px;
+  border-radius: var(--r-pill);
+  background: rgba(255, 255, 255, 0.12);
+  transition: background 0.18s;
+}
+.export-toggle-knob::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: #fff;
+  opacity: 0.7;
+  transition:
+    transform 0.18s var(--ease-spring),
+    opacity 0.18s;
+}
+.export-toggle--on .export-toggle-knob {
+  background: var(--accent);
+}
+.export-toggle--on .export-toggle-knob::after {
+  transform: translateX(11px);
+  opacity: 1;
+}
+
+/* Audio format: two pickable cards rather than a segmented control — there's a
+   real trade-off (size vs fidelity) and each option gets a line to say it. */
+.export-choices {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.export-choice {
+  height: 53px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  padding: 0 12px;
+  text-align: left;
+  font-family: var(--font);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition:
+    color 0.15s,
+    background 0.15s,
+    border-color 0.15s;
+}
+.export-choice:hover {
+  color: var(--text);
+  border-color: var(--border-hi);
+}
+.export-choice--on {
+  color: var(--text);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.export-choice-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 16px;
+  letter-spacing: -0.01em;
+}
+.export-choice-hint {
+  font-size: 11px;
+  line-height: 14px;
+  color: var(--text-dim);
+}
+.export-choice--on .export-choice-hint {
+  color: var(--text-muted);
+}
+
+/* Details: a compact spec sheet of the piece. 45px rows, so three of them
+   (Audio) and five (MIDI) land on the shared row budget documented above. */
+.export-kv {
+  padding: 3px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: rgba(255, 255, 255, 0.02);
+}
+.export-kv-row {
+  height: 45px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 12px;
+}
+.export-kv-row + .export-kv-row {
+  border-top: 1px solid var(--border);
+}
+.export-kv-k {
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.export-kv-v {
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Framing + Fall slide open for social formats (grid-rows transition keeps
+   the card from popping). */
+.export-social {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.26s var(--ease-out);
+}
+.export-social--open {
+  grid-template-rows: 1fr;
+}
+.export-social-inner {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.export-social--open .export-social-inner {
+  padding-top: 2px;
+}
+
+/* Progress/error phases are centred and content-sized inside the compact card. */
+.export-progress {
+  justify-content: center;
+  padding: 12px 0;
+}
+.export-actions--center {
+  justify-content: center;
+  border-top: none;
+  margin-top: 6px;
+  padding-top: 0;
+}
+
+/* Narrow: single column, preview on top, shorter stage. */
+@media (max-width: 759px) {
+  .export-card {
+    --stage: 180px;
+    width: 460px;
+    padding: 20px 20px 18px;
+  }
+  .export-body {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 18px;
+  }
+  /* Height-led here: a 9:16 stage at full sheet width would be taller than the
+     screen, so the aspect hangs off a capped height instead. */
+  .export-stage {
+    width: auto;
+    max-width: 100%;
+    height: var(--stage);
+    aspect-ratio: var(--stage-ar);
+  }
+  .export-caption {
+    text-align: center;
+  }
+  .export-caption-line {
+    justify-content: center;
+  }
+}
+/* Short screens with width to spare: keep two columns, shrink the stage. */
+@media (min-width: 760px) and (max-height: 620px) {
+  .export-card {
+    --stage: 220px;
+    padding-top: 16px;
+    padding-bottom: 14px;
+  }
+  .export-head {
+    margin-bottom: 12px;
+  }
+}
+/* Phones: bottom sheet. */
+@media (max-width: 640px) {
+  #export-modal {
+    --modal-vpad: 12px;
+    align-items: flex-end;
+    padding-left: 0;
+    padding-right: 0;
+    padding-bottom: 0;
+  }
+  .export-card,
+  .export-card[data-phase="progress"],
+  .export-card[data-phase="error"] {
+    --stage: 150px;
+    width: 100%;
+    border-radius: var(--r-xl) var(--r-xl) 0 0;
+    border-bottom: none;
+    padding: 14px 18px calc(16px + env(safe-area-inset-bottom, 0px));
+    transform: translateY(24px);
+  }
+  .export-card::before {
+    content: "";
+    display: block;
+    width: 36px;
+    height: 4px;
+    margin: 0 auto 12px;
+    border-radius: var(--r-pill);
+    background: rgba(255, 255, 255, 0.18);
+  }
+  #export-modal.open .export-card {
+    transform: translateY(0);
+  }
+  .export-tab {
+    padding: 5px 11px;
+  }
+  .export-actions {
+    margin-top: 16px;
+    padding-top: 12px;
+  }
+  .export-actions .modal-btn--accent {
+    flex: 1;
+    justify-content: center;
+  }
 }
 
 /* Modal action buttons */
@@ -4954,7 +6007,7 @@ body.canvas-hidden #kbd-resizer {
   animation: spin 0.65s linear infinite;
 }
 
-.export-stage {
+.export-stage-label {
   font-size: 15px;
   font-weight: 600;
   color: var(--text);
@@ -5035,6 +6088,62 @@ body.canvas-hidden #kbd-resizer {
   color: var(--text-muted);
   letter-spacing: 0.04em;
   min-height: 1em;
+}
+
+.export-eta {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  margin-top: -8px;
+}
+
+/* Error phase */
+.export-error-icon {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 2px solid var(--red-border);
+  color: var(--red-text);
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.export-error-msg {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  text-align: center;
+  max-width: 40ch;
+  margin: 0;
+  overflow-wrap: break-word;
+}
+
+/* Icon + title + subline header shared by the post-session card (the export
+   dialog moved to its tabbed .export-head). */
+.modal-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  margin-bottom: 22px;
+}
+.modal-header-text {
+  flex: 1;
+  min-width: 0;
+}
+.modal-header-icon {
+  color: var(--accent);
+  opacity: 0.88;
+  padding: 8px;
+  background: var(--accent-soft);
+  border-radius: var(--r-md);
+  display: inline-flex;
+}
+.modal-header-sub {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.5;
 }
 
 /* ─────────────────────────────────────────
@@ -5858,12 +6967,11 @@ body.canvas-hidden #kbd-resizer {
 }
 
 /* ─── Export modal: narrow viewport fixes.
-   - fps-group tabs wrap instead of overflowing
-   - res-card grid auto-fits
-   - taller vertical padding on the overlay (see --modal-vpad) so .modal-scroll
-     max-height matches; card still scrolls inside itself on short phones. */
+   — fps-group tabs wrap instead of overflowing
+   — taller vertical padding on the overlay (see --modal-vpad) so .modal-scroll
+     max-height matches; card still scrolls inside itself on short phones.
+   The export dialog has its own phone rules (bottom sheet) next to .export-*. */
 @media (max-width: 640px) {
-  #export-modal,
   #post-session-modal {
     --modal-vpad: 32px;
     align-items: flex-start;
@@ -5872,11 +6980,6 @@ body.canvas-hidden #kbd-resizer {
     padding-left: calc(12px + env(safe-area-inset-left, 0px));
     padding-right: calc(12px + env(safe-area-inset-right, 0px));
   }
-  .export-card {
-    width: 100%;
-    max-width: 100%;
-    padding: 18px 16px 16px;
-  }
   .post-session-card {
     width: 100%;
     max-width: 100%;
@@ -5884,14 +6987,6 @@ body.canvas-hidden #kbd-resizer {
   .fps-group {
     flex-wrap: wrap;
     justify-content: center;
-  }
-  .export-section .fps-btn {
-    flex: 0 1 auto;
-    padding: 6px 10px;
-    font-size: 11.5px;
-  }
-  .res-grid {
-    grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
   }
 }
 
@@ -5944,6 +7039,10 @@ body.canvas-hidden #kbd-resizer {
 .float-hud [data-tip]:active::after {
   transform: translateX(-50%) translateY(0);
 }
+.float-hud__reopen:has(.pa-hud__mini-restart:hover)::after {
+  opacity: 0;
+}
+
 /* On mobile portrait the HUD is docked at the top, so flip back to below. */
 @media (max-width: 640px) and (orientation: portrait) {
   .float-hud [data-tip]::after {
@@ -6316,7 +7415,7 @@ body.canvas-hidden #kbd-resizer {
   animation: ts-chord-readout-pulse 0.32s var(--ease-spring);
 }
 
-/* Compact icon-only toggle. The chord readout is a niche, opt-in feature —
+/* Compact icon-only toggle. The chord readout is a niche, opt-in feature -
    the button reflects that with a small footprint and dim default state, so
    it doesn't compete with primary topbar actions for attention. */
 .ts-chord-btn {
@@ -6408,6 +7507,11 @@ body.canvas-hidden #kbd-resizer {
   color: var(--text);
   pointer-events: auto;
 }
+/* A bubble already on screen hides for as long as a modal is up (the show
+   timer itself waits for overlays to close — see Coachmark.tsx). */
+body:has(#export-modal.open, #midi-picker-modal.open, #post-session-modal.open) .coachmark {
+  display: none;
+}
 .coachmark--below {
   transform: translateX(-50%);
   animation: coachmark-in-below 220ms var(--ease-out) both;
@@ -6418,21 +7522,25 @@ body.canvas-hidden #kbd-resizer {
 }
 .coachmark__arrow {
   position: absolute;
-  left: 50%;
+  left: var(--arrow-x, 50%);
   width: 9px;
   height: 9px;
   background: inherit;
   transform: translateX(-50%) rotate(45deg);
 }
+/* The bubble's edge is border + a 1px accent ring (box-shadow); the arrow's
+   two outer edges carry both so it reads as part of the same outline. */
 .coachmark--below .coachmark__arrow {
   top: -5px;
   border-top: 1px solid var(--border-hi);
   border-left: 1px solid var(--border-hi);
+  box-shadow: -1px -1px 0 var(--accent-glow);
 }
 .coachmark--above .coachmark__arrow {
   bottom: -5px;
   border-bottom: 1px solid var(--border-hi);
   border-right: 1px solid var(--border-hi);
+  box-shadow: 1px 1px 0 var(--accent-glow);
 }
 .coachmark__title {
   display: inline-flex;
@@ -6554,23 +7662,20 @@ body.canvas-hidden #kbd-resizer {
   background: color-mix(in srgb, var(--accent) 8%, rgba(255, 255, 255, 0.04));
 }
 
-.ts-customize-swatch {
+.ts-customize-icon {
   position: relative;
   z-index: 1;
-  width: 18px;
-  height: 18px;
-  border-radius: 6px;
-  background: var(--accent);
-  box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.18) inset,
-    0 0 12px var(--accent-glow);
-  transition:
-    transform 0.2s var(--ease-spring),
-    box-shadow 0.2s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* `color` is set inline to the active theme accent (palette glyph uses
+     currentColor), so the trigger still reflects the current theme. */
+  filter: drop-shadow(0 0 6px var(--accent-glow));
+  transition: transform 0.2s var(--ease-spring);
 }
 
-.ts-pill--customize:hover .ts-customize-swatch {
-  transform: rotate(-6deg) scale(1.04);
+.ts-pill--customize:hover .ts-customize-icon {
+  transform: rotate(-6deg) scale(1.06);
 }
 
 .ts-customize-label {
@@ -6605,15 +7710,42 @@ body.canvas-hidden #kbd-resizer {
    shell + .panel-header + horizontal-rule-divided sections. Same header
    padding and hierarchy → consistent across the topbar. */
 .ts-customize-menu {
-  width: 300px;
+  position: fixed;
+  z-index: 120;
+  width: 340px;
+  max-width: calc(100vw - 24px);
+  /* This menu is content-dense (theme grid + particles + chord + language +
+     feedback), so give it more vertical room than the shared .ts-popover cap
+     (min(60vh, 520px)) before the body starts scrolling. */
+  max-height: min(720px, var(--customize-available-height, 82vh));
   padding: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
 
+/* Keep the anchor available while its detached appearance panel is open. */
+body.appearance-open #top-strip.strip--dim {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.ts-customize-menu :is(button, a):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.ts-customize-menu .panel-header {
+  padding: 10px 12px 10px 16px;
+}
+
+.ts-customize-menu .panel-close-btn {
+  width: 28px;
+  height: 28px;
+}
+
 /* Scroll region between the pinned header and the popover edge. Lets the
-   menu stay usable on short viewports (landscape phones, small laptops) —
+   menu stay usable on short viewports (landscape phones, small laptops) -
    the header holds, the sections scroll, nothing gets clipped. */
 .ts-customize-body {
   flex: 1 1 auto;
@@ -6731,8 +7863,8 @@ body.canvas-hidden #kbd-resizer {
 /* ── Theme tiles — flat colour dot + name label. ── */
 .customize-theme-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 4px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px 6px;
   /* Belt-and-braces — the popover already clips, but constraining the grid
      itself prevents an overflowing label from pushing siblings outward. */
   width: 100%;
@@ -6740,6 +7872,7 @@ body.canvas-hidden #kbd-resizer {
 }
 
 .customize-theme-tile {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -6782,6 +7915,39 @@ body.canvas-hidden #kbd-resizer {
   transition: transform 0.18s var(--ease-spring);
 }
 
+.customize-theme-tile--new {
+  border-color: color-mix(in srgb, var(--theme-accent) 19%, transparent);
+  background: color-mix(in srgb, var(--theme-accent) 4%, transparent);
+  color: var(--text-muted);
+}
+
+.customize-theme-tile--new.customize-theme-tile--on {
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  color: var(--text);
+}
+
+.customize-theme-tile--material .customize-theme-tile-dot {
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.2);
+}
+
+.customize-theme-new {
+  position: absolute;
+  top: -6px;
+  right: 5px;
+  padding: 1px 4px;
+  border: 1px solid color-mix(in srgb, var(--theme-accent) 25%, transparent);
+  border-radius: 4px;
+  background: #17181e;
+  color: var(--theme-accent);
+  font-size: 7px;
+  font-weight: 600;
+  line-height: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+
 .customize-theme-tile:hover .customize-theme-tile-dot {
   transform: scale(1.06);
 }
@@ -6815,8 +7981,9 @@ body.canvas-hidden #kbd-resizer {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 10px;
-  border-radius: var(--r-pill);
+  min-height: 32px;
+  padding: 7px 9px;
+  border-radius: 8px;
   border: 1px solid var(--border);
   background: rgba(255, 255, 255, 0.025);
   color: var(--text-muted);
@@ -6839,6 +8006,18 @@ body.canvas-hidden #kbd-resizer {
   display: inline-flex;
   align-items: center;
   line-height: 1;
+}
+
+.customize-particle-check {
+  display: inline-flex;
+  width: 11px;
+  height: 11px;
+  color: var(--accent);
+  opacity: 0;
+}
+
+.customize-particle-chip--on .customize-particle-check {
+  opacity: 1;
 }
 
 /* ─── Locale chips — same shape language as particle chips so the section
@@ -7045,14 +8224,8 @@ body.canvas-hidden #kbd-resizer {
   .customize-section {
     padding: 12px 14px;
   }
-  .customize-head {
-    padding: 12px 14px 10px;
-  }
   .customize-theme-grid {
-    gap: 5px;
-  }
-  .customize-theme-tile-preview {
-    height: 34px;
+    gap: 10px 5px;
   }
 }
 
@@ -7359,25 +8532,6 @@ body.canvas-hidden #kbd-resizer {
 }
 
 /* Close button */
-.sr-hud__close {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-  border: none;
-  background: transparent;
-  color: rgba(255, 255, 255, 0.35);
-  cursor: pointer;
-  transition:
-    background 0.15s,
-    color 0.15s;
-}
-.sr-hud__close:hover {
-  background: rgba(255, 255, 255, 0.07);
-  color: rgba(255, 255, 255, 0.7);
-}
 
 /* ─── Sight-reading end panel ───────────────────────────── */
 

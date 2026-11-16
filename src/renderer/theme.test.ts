@@ -1,6 +1,29 @@
 import { describe, expect, it } from 'vitest'
-import type { MidiTrack } from '../core/midi/types'
-import { getTrackColor, THEMES } from './theme'
+import { type MidiTrack, TRACK_COLOR_SLOTS } from '../core/midi/types'
+import {
+  ALL_THEMES,
+  accentCSS,
+  getTrackColor,
+  liveNoteColor,
+  THEMES,
+  type Theme,
+  type ThemeId,
+} from './theme'
+
+// Compile-time exhaustiveness over the `ThemeId` union.
+const EXPECTED_THEME_IDS: Record<ThemeId, true> = {
+  dark: true,
+  midnight: true,
+  neon: true,
+  sunset: true,
+  ocean: true,
+  'smoked-glass': true,
+  'aurora-silk': true,
+  'lacquer-gold': true,
+  opal: true,
+  'liquid-glass': true,
+  'ember-mist': true,
+}
 
 const track = (colorIndex: number): MidiTrack => ({
   id: 't',
@@ -9,7 +32,6 @@ const track = (colorIndex: number): MidiTrack => ({
   instrument: 0,
   isDrum: false,
   notes: [],
-  color: 0,
   colorIndex,
 })
 
@@ -28,5 +50,43 @@ describe('getTrackColor', () => {
     const len = theme.trackColors.length
     expect(getTrackColor(track(len), theme)).toBe(theme.trackColors[0])
     expect(getTrackColor(track(len + 3), theme)).toBe(theme.trackColors[3])
+  })
+})
+
+describe('accentCSS', () => {
+  it('renders the numeric accent as a #rrggbb string', () => {
+    expect(accentCSS({ accent: 0xf97316 } as Theme)).toBe('#f97316')
+    expect(accentCSS({ accent: 0x0000ff } as Theme)).toBe('#0000ff')
+  })
+
+  it('every built-in theme has a unique id and an in-range accent', () => {
+    const ids = new Set(THEMES.map((t) => t.id))
+    expect(ids.size).toBe(THEMES.length)
+    for (const theme of THEMES) {
+      expect(theme.accent).toBeGreaterThanOrEqual(0)
+      expect(theme.accent).toBeLessThanOrEqual(0xffffff)
+    }
+  })
+})
+
+describe('liveNoteColor', () => {
+  it('uses the first track palette slot', () => {
+    const theme = THEMES[0]!
+    expect(liveNoteColor(theme)).toBe(theme.trackColors[0])
+  })
+
+  it('falls back to the now-line colour for an empty palette', () => {
+    expect(liveNoteColor({ trackColors: [], nowLine: 0xabcdef } as unknown as Theme)).toBe(0xabcdef)
+  })
+})
+
+describe('theme roster', () => {
+  it('retains exactly one catalog entry per persisted ThemeId', () => {
+    const ids = ALL_THEMES.map((t) => t.id)
+    expect([...ids].sort()).toEqual(Object.keys(EXPECTED_THEME_IDS).sort())
+  })
+
+  it.each(THEMES)('$name has exactly TRACK_COLOR_SLOTS track colours', (theme) => {
+    expect(theme.trackColors).toHaveLength(TRACK_COLOR_SLOTS)
   })
 })

@@ -40,10 +40,19 @@ export const icons = {
       `<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>`,
     ),
 
+  volumeMuted: (size: Size = 13): string =>
+    svgStroke(
+      size,
+      `<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="16" y1="9" x2="22" y2="15"/><line x1="22" y1="9" x2="16" y2="15"/>`,
+    ),
+
+  // Vertical scale, not magnification: this control changes note HEIGHT, so a
+  // magnifier read as "zoom the canvas" and needed the tooltip to explain it.
+  // A double-headed vertical arrow says "taller / shorter".
   zoom: (size: Size = 13): string =>
     svgStroke(
       size,
-      `<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/>`,
+      `<line x1="12" y1="4" x2="12" y2="20"/><polyline points="8 8 12 4 16 8"/><polyline points="8 16 12 20 16 16"/>`,
     ),
 
   metronome: (size: Size = 13): string =>
@@ -87,6 +96,10 @@ export const icons = {
       `<line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/>`,
     ),
 
+  // Sustain pedal, front-on: stem over a foot plate. The foot carries a class
+  // so CSS can fill it while the pedal is down.
+  pedal: (size: Size = 14): string =>
+    svgStroke(size, `<path d="M10 3h4v7h-4z"/><path class="ts-pedal-foot" d="M6 10h12l2 9H4z"/>`),
   midi: (size: Size = 14): string =>
     svgStroke(
       size,
@@ -203,6 +216,26 @@ export const icons = {
       size,
       `<line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/>`,
       2.4,
+    ),
+
+  // Slider/fader glyph for the HUD reopener — reads as "controls".
+  sliders: (size: Size = 14): string =>
+    svgStroke(
+      size,
+      `<line x1="4" y1="8" x2="20" y2="8"/><line x1="4" y1="16" x2="20" y2="16"/>` +
+        `<circle cx="9" cy="8" r="2.2"/><circle cx="15" cy="16" r="2.2"/>`,
+      1.9,
+    ),
+
+  // Artist's palette — the Appearance / customize trigger. Reads as
+  // "theme & looks" far more clearly than a bare colour swatch.
+  palette: (size: Size = 16): string =>
+    svgStroke(
+      size,
+      `<circle cx="13.5" cy="6.5" r=".6"/><circle cx="17.5" cy="10.5" r=".6"/>` +
+        `<circle cx="8.5" cy="7.5" r=".6"/><circle cx="6.5" cy="12.5" r=".6"/>` +
+        `<path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.555C21.965 6.012 17.461 2 12 2z"/>`,
+      1.9,
     ),
 
   // Keycap glyph for the keyboard-hint reopener — reads as "keyboard help".

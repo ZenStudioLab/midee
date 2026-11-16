@@ -1,11 +1,17 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import type { MidiFile, MidiNote, MidiTrack } from '../core/midi/types'
+import { type MidiFile, type MidiNote, type MidiTrack, nominalTempoMap } from '../core/midi/types'
 import {
+  exportFraming,
   fitPitchRange,
+  overallProgress,
+  type ProgressMode,
   pitchSignature,
   resolveExportBitrate,
   resolveExportDims,
+  resolveExportRender,
   speedToPps,
+  stageEtaSeconds,
+  stageWindow,
   trimAudioBuffer,
   trimmedFrameCount,
 } from './exportMath'
@@ -24,7 +30,6 @@ function track(pitches: number[]): MidiTrack {
     instrument: 0,
     isDrum: false,
     notes: pitches.map(note),
-    color: 0,
     colorIndex: 0,
   }
 }
@@ -35,6 +40,7 @@ function midiWith(...trackPitches: number[][]): MidiFile {
     duration: 10,
     bpm: 120,
     timeSignature: [4, 4],
+    ...nominalTempoMap(120, [4, 4]),
     tracks: trackPitches.map(track),
   }
 }
@@ -48,13 +54,13 @@ describe('fitPitchRange', () => {
   })
 
   it('pads a wide range by 12% of its span (rounded), clamped to 21..108', () => {
-    // span = 84 - 36 = 48; pad = round(48 * 0.12) = round(5.76) = 6
+    // span = 84 — 36 = 48; pad = round(48 * 0.12) = round(5.76) = 6
     const r = fitPitchRange(midiWith([36, 84]))
     expect(r).toEqual({ min: 30, max: 90 })
   })
 
   it('uses the 3-semitone floor when 12% of the span is smaller', () => {
-    // span = 64 - 60 = 4; round(0.48) = 0 -> floor at 3
+    // span = 64 — 60 = 4; round(0.48) = 0 -> floor at 3
     const r = fitPitchRange(midiWith([60, 64]))
     expect(r).toEqual({ min: 57, max: 67 })
   })
@@ -263,6 +269,72 @@ describe('resolveExportDims', () => {
   })
 })
 
+// --- resolveExportRender -----------------------------------------------------
+
+describe('resolveExportRender', () => {
+  const win = { width: 1440, height: 900 }
+  const presets = ['720p', '1080p', '2k', '4k', 'vertical', 'square'] as const
+
+  it('renders every landscape preset on the same 1920x1080 logical stage', () => {
+    for (const p of ['720p', '1080p', '2k', '4k'] as const) {
+      const plan = resolveExportRender(p, win)
+      expect(plan.logicalWidth).toBe(1920)
+      expect(plan.logicalHeight).toBe(1080)
+    }
+  })
+
+  it('varies only the resolution multiplier across landscape presets', () => {
+    expect(resolveExportRender('720p', win).resolution).toBeCloseTo(2 / 3, 10)
+    expect(resolveExportRender('1080p', win).resolution).toBe(1)
+    expect(resolveExportRender('2k', win).resolution).toBeCloseTo(4 / 3, 10)
+    expect(resolveExportRender('4k', win).resolution).toBe(2)
+  })
+
+  it('renders social formats at native logical size (resolution 1)', () => {
+    expect(resolveExportRender('vertical', win)).toEqual({
+      logicalWidth: 1080,
+      logicalHeight: 1920,
+      resolution: 1,
+    })
+    expect(resolveExportRender('square', win)).toEqual({
+      logicalWidth: 1080,
+      logicalHeight: 1080,
+      resolution: 1,
+    })
+  })
+
+  it("passes the window through for 'match', keeping its display density", () => {
+    expect(resolveExportRender('match', win)).toEqual({
+      logicalWidth: 1440,
+      logicalHeight: 900,
+      resolution: 1,
+    })
+    expect(resolveExportRender('match', { ...win, resolution: 2 }).resolution).toBe(2)
+  })
+
+  // The load-bearing invariant: Pixi sizes the backing store as
+  // round(logical * resolution), which must land exactly on the dims table the
+  // encoder + telemetry use.
+  it('produces a backing store equal to resolveExportDims for every preset', () => {
+    for (const p of presets) {
+      const dims = resolveExportDims(p)
+      expect(dims).not.toBeNull()
+      const plan = resolveExportRender(p, win)
+      expect(Math.round(plan.logicalWidth * plan.resolution)).toBe(dims?.width)
+      expect(Math.round(plan.logicalHeight * plan.resolution)).toBe(dims?.height)
+    }
+  })
+
+  it('keeps the logical stage aspect ratio equal to the output aspect ratio', () => {
+    for (const p of presets) {
+      const dims = resolveExportDims(p)
+      if (!dims) throw new Error(`no dims for ${p}`)
+      const plan = resolveExportRender(p, win)
+      expect(plan.logicalWidth / plan.logicalHeight).toBeCloseTo(dims.width / dims.height, 6)
+    }
+  })
+})
+
 // --- resolveExportBitrate ----------------------------------------------------
 
 describe('resolveExportBitrate', () => {
@@ -307,5 +379,86 @@ describe('pitchSignature', () => {
     const a = pitchSignature(new Set([67, 60, 64]))
     const b = pitchSignature(new Set([64, 67, 60]))
     expect(a).toBe(b)
+  })
+})
+
+// --- staged progress ---------------------------------------------------------
+
+describe('stageWindow / overallProgress', () => {
+  it('covers 0→1 contiguously for every progress mode', () => {
+    const sequences: Record<ProgressMode, string[]> = {
+      av: ['Encoding', 'Rendering audio', 'Encoding audio', 'Finalizing', 'Saving'],
+      'video-only': ['Encoding', 'Finalizing', 'Saving'],
+      'audio-only': ['Rendering audio', 'Saving'],
+    }
+    for (const [mode, stages] of Object.entries(sequences) as Array<
+      [ProgressMode, Array<Parameters<typeof stageWindow>[1]>]
+    >) {
+      let cursor = 0
+      for (const stage of stages) {
+        const w = stageWindow(mode, stage)
+        expect(w.from).toBeCloseTo(cursor, 10)
+        expect(w.to).toBeGreaterThan(w.from)
+        cursor = w.to
+      }
+      expect(cursor).toBe(1)
+    }
+  })
+
+  it('maps per-stage pct into the stage window on the overall bar', () => {
+    // av encode runs 0→0.9: halfway through it = 0.45 overall.
+    expect(overallProgress('av', 'Encoding', 0.5)).toBeCloseTo(0.45, 10)
+    expect(overallProgress('av', 'Encoding', 0)).toBeCloseTo(0, 10)
+    expect(overallProgress('av', 'Encoding', 1)).toBeCloseTo(0.9, 10)
+  })
+
+  it('clamps out-of-range pct instead of escaping the stage window', () => {
+    expect(overallProgress('av', 'Encoding', -0.5)).toBeCloseTo(0, 10)
+    expect(overallProgress('av', 'Encoding', 1.7)).toBeCloseTo(0.9, 10)
+  })
+
+  it('falls back to a full-range single step for stages a mode never emits', () => {
+    // video-only never renders audio; the fallback keeps the bar sane.
+    expect(stageWindow('video-only', 'Rendering audio')).toEqual({ from: 0, to: 1 })
+  })
+
+  it("'Done' pins the bar at 100% in every mode", () => {
+    for (const mode of ['av', 'video-only', 'audio-only'] as const) {
+      expect(overallProgress(mode, 'Done', 1)).toBe(1)
+    }
+  })
+})
+
+describe('stageEtaSeconds', () => {
+  it('returns null while the rate is still junk (too early)', () => {
+    expect(stageEtaSeconds(10_000, 0.02)).toBeNull() // < 4% done
+    expect(stageEtaSeconds(1000, 0.5)).toBeNull() // < 3 s elapsed
+  })
+
+  it('extrapolates the remaining time from the stage-local rate', () => {
+    // 10 s for 25% → 30 s left.
+    expect(stageEtaSeconds(10_000, 0.25)).toBeCloseTo(30, 6)
+    // 60 s for 50% → 60 s left.
+    expect(stageEtaSeconds(60_000, 0.5)).toBeCloseTo(60, 6)
+  })
+
+  it('approaches zero as the stage completes', () => {
+    expect(stageEtaSeconds(120_000, 0.999)).toBeLessThan(1)
+  })
+})
+
+describe('exportFraming', () => {
+  const midi = midiWith([60])
+
+  it('leaves landscape exports alone', () => {
+    expect(exportFraming({ resolution: '1080p', focus: 'fit', speed: 'drama' }, midi)).toEqual({})
+  })
+
+  it('applies fit + fall speed for social formats, fall only for all-keys', () => {
+    const fit = exportFraming({ resolution: 'vertical', focus: 'fit', speed: 'drama' }, midi)
+    expect(fit.pixelsPerSecond).toBe(120)
+    expect(fit.pitchRange).toEqual({ min: 57, max: 63 })
+    const all = exportFraming({ resolution: 'square', focus: 'all', speed: 'compact' }, midi)
+    expect(all).toEqual({ pixelsPerSecond: 300 })
   })
 })

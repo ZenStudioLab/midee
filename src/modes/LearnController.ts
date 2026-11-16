@@ -1,5 +1,6 @@
-import { parseMidiFile } from '../core/midi/parser'
+import { parseMidiFileWithStats } from '../core/midi/parser'
 import type { MidiFile } from '../core/midi/types'
+import { forgetRecent, readRecentMidi, rememberRecent } from '../core/recentMidi'
 import { fetchSampleMidi, getSample } from '../core/samples'
 import { t } from '../i18n'
 import type { ExerciseDescriptor } from '../learn/core/Exercise'
@@ -175,8 +176,18 @@ export class LearnController {
   async loadMidiFromFile(file: File, source: 'drag' | 'picker' = 'picker'): Promise<void> {
     this.learnState.beginLoad()
     try {
-      const midi = await parseMidiFile(file)
+      const { midi, stats } = await parseMidiFileWithStats(file)
+      trackEvent('midi_parse_quality', {
+        target: 'learn',
+        out_of_range_notes: stats.outOfRangeNotes,
+        has_sustain_pedal: stats.hasSustainPedal,
+        tempo_events: stats.tempoEvents,
+      })
       await this.consumeMidi(midi)
+      // Recents are shared with Play: a file practised here is one click away
+      // from the home grid, and vice versa. Fire-and-forget — a storage
+      // failure must never surface as a failed load.
+      void rememberRecent(file, midi)
       trackMidiLoaded({
         source,
         target: 'learn',
@@ -228,6 +239,45 @@ export class LearnController {
     }
   }
 
+  // Re-open a previously-loaded file from IndexedDB. Same shape as
+  // `loadSample`: we end up holding a parsed MidiFile, never a File.
+  async loadRecent(recentId: string): Promise<void> {
+    this.ctx.primeInteractiveAudio()
+    this.learnState.beginLoad()
+    let midi: MidiFile | null
+    try {
+      midi = await readRecentMidi(recentId)
+    } catch (err) {
+      // Bytes that no longer parse are dead weight — drop the entry so the
+      // broken card doesn't come back.
+      console.error('[LearnController] loadRecent parse failed:', err)
+      void forgetRecent(recentId)
+      midi = null
+    }
+    if (!midi) {
+      trackEvent('recent_load_failed', { target: 'learn' })
+      this.learnState.setState('status', 'ready')
+      this.showError(t('error.recent.loadFailed'))
+      return
+    }
+    await this.consumeMidi(midi)
+    trackMidiLoaded({
+      source: 'recent',
+      target: 'learn',
+      trackCount: midi.tracks.length,
+      noteCount: midi.tracks.reduce((n, tk) => n + tk.notes.length, 0),
+      durationS: Math.round(midi.duration),
+    })
+  }
+
+  // Learn's counterpart to `AppStore.completePlayLoad`: the single gate every
+  // Learn loader (file, sample, recent, cross-mode hand-off) funnels through.
+  //
+  // No transpose here by design: Play's `transpose` is a per-piece playback
+  // setting on `AppStore`, and Learn keeps its MIDI on `LearnState` precisely
+  // so the two modes never share transport state. Practising a piece a
+  // semitone off what the app told you to play would also be a scoring trap.
+  // Notes off the 88 keys are audible but undrawn; PracticeEngine skips them.
   private async consumeMidi(midi: MidiFile): Promise<void> {
     // A newly selected piece is a fresh practice session. Do not inherit the
     // previous exercise's playhead, hand focus, loop, or wait state.

@@ -7,7 +7,8 @@
 // behavioral change.
 
 import type { MidiFile } from '../core/midi/types'
-import type { ExportResolution, ExportSpeed } from '../ui/ExportModal'
+import type { ExportFocus, ExportResolution, ExportSpeed } from '../ui/ExportModal'
+import type { ExportStage } from './VideoExporter'
 
 // Scans the MIDI's notes for min/max pitch and pads outward by a few keys so
 // the visible range feels natural rather than clipping right at the extremes.
@@ -28,6 +29,24 @@ export function fitPitchRange(midi: MidiFile): { min: number; max: number } {
   return {
     min: Math.max(21, lo - pad),
     max: Math.min(108, hi + pad),
+  }
+}
+
+export function isSocialPreset(preset: ExportResolution): boolean {
+  return preset === 'vertical' || preset === 'square'
+}
+
+// The one framing policy for social exports, shared by the dialog preview
+// and the real export so the frame you see is the frame you get. Landscape
+// exports keep the live viewport untouched.
+export function exportFraming(
+  settings: { resolution: ExportResolution; focus: ExportFocus; speed: ExportSpeed },
+  midi: MidiFile,
+): { pitchRange?: { min: number; max: number }; pixelsPerSecond?: number } {
+  if (!isSocialPreset(settings.resolution)) return {}
+  return {
+    ...(settings.focus === 'fit' ? { pitchRange: fitPitchRange(midi) } : {}),
+    pixelsPerSecond: speedToPps(settings.speed),
   }
 }
 
@@ -109,6 +128,66 @@ export function resolveExportDims(
   }
 }
 
+// ── Staged progress ─────────────────────────────────────────────────────────
+// Maps each encoder stage onto a fixed window of ONE overall progress bar. The old per-stage bar reset to 0% on every stage
+// change, which read as "stuck in a loop" — PostHog showed a 24.5 s median
+// cancel time. Window sizes are rough wall-clock weights; exactness doesn't
+// matter because the bar is clamped monotonic by the caller. Only the modes
+// that show a progress card appear here ('midi' downloads instantly).
+
+export type ProgressMode = 'av' | 'video-only' | 'audio-only'
+
+export interface StageWindow {
+  from: number // overall-bar fraction where this stage begins
+  to: number // …and ends
+}
+
+const STAGE_WINDOWS: Record<ProgressMode, Partial<Record<ExportStage, StageWindow>>> = {
+  // Audio renders and encodes concurrently with the video loop, so the bar
+  // follows the encode; the two audio stages only surface if audio is still
+  // in flight after the last video frame, hence their thin windows.
+  av: {
+    Encoding: { from: 0, to: 0.9 },
+    'Rendering audio': { from: 0.9, to: 0.93 },
+    'Encoding audio': { from: 0.93, to: 0.95 },
+    Finalizing: { from: 0.95, to: 0.98 },
+    Saving: { from: 0.98, to: 1 },
+    Done: { from: 1, to: 1 },
+  },
+  'video-only': {
+    Encoding: { from: 0, to: 0.9 },
+    Finalizing: { from: 0.9, to: 0.98 },
+    Saving: { from: 0.98, to: 1 },
+    Done: { from: 1, to: 1 },
+  },
+  'audio-only': {
+    'Rendering audio': { from: 0, to: 0.85 },
+    Saving: { from: 0.85, to: 1 },
+    Done: { from: 1, to: 1 },
+  },
+}
+
+// Total-range fallback for stage/mode combos that shouldn't occur (e.g. an
+// 'av' export whose audio render failed skips 'Encoding audio') — the bar
+// stays sane instead of throwing mid-export.
+export function stageWindow(mode: ProgressMode, stage: ExportStage): StageWindow {
+  return STAGE_WINDOWS[mode][stage] ?? { from: 0, to: 1 }
+}
+
+// Overall-bar position for a per-stage fraction. Callers clamp monotonic.
+export function overallProgress(mode: ProgressMode, stage: ExportStage, pct: number): number {
+  const w = stageWindow(mode, stage)
+  const clamped = Math.min(1, Math.max(0, pct))
+  return w.from + clamped * (w.to - w.from)
+}
+
+// Stage-local ETA in seconds, or null while the estimate would still be junk
+// (too early in the stage for the rate to have stabilised).
+export function stageEtaSeconds(elapsedMs: number, pct: number): number | null {
+  if (pct < 0.04 || elapsedMs < 3000) return null
+  return ((elapsedMs / 1000) * (1 - pct)) / pct
+}
+
 // H.264 bitrate per preset. Lower than YouTube's recommendations but tuned
 // for visual fidelity of a piano-roll (mostly dark background, few gradients)
 // — the encoder doesn't need YouTube's overhead for live-action footage.
@@ -128,5 +207,55 @@ export function resolveExportBitrate(preset: ExportResolution): number {
       return 5_000_000
     case 'match':
       return 8_000_000
+  }
+}
+
+// Resolution is a SHARPNESS choice, not a layout choice.
+//
+// Every renderer constant (keyboard height, glow distance, line widths,
+// particle sizes) is in logical pixels, so rendering a 4K export at a 3840×2160
+// logical canvas produced a 1080p layout shrunk to a quarter size — the piano
+// looked proportionally much shorter at 4K than at 720p. Instead each format
+// renders at a FIXED logical size and Pixi's `resolution` multiplier scales the
+// backing store up/down to the requested pixel size.
+//
+// Invariant: `Math.round(logical × resolution)` equals `resolveExportDims()` for
+// every preset (Pixi rounds pixel dimensions the same way), so the encoder still
+// sees the exact dimensions the user picked.
+export interface ExportRenderPlan {
+  logicalWidth: number
+  logicalHeight: number
+  resolution: number
+}
+
+const LANDSCAPE_LOGICAL = { width: 1920, height: 1080 }
+
+// `windowSize.resolution` is the live canvas density (devicePixelRatio, capped),
+// so 'match' exports the window exactly as displayed — Retina stays sharp.
+export function resolveExportRender(
+  preset: ExportResolution,
+  windowSize: { width: number; height: number; resolution?: number },
+): ExportRenderPlan {
+  if (preset === 'match') {
+    return {
+      logicalWidth: windowSize.width,
+      logicalHeight: windowSize.height,
+      resolution: windowSize.resolution ?? 1,
+    }
+  }
+  const dims = resolveExportDims(preset)
+  // Unreachable: 'match' is the only preset without dims. Keeps the compiler
+  // honest without a non-null assertion.
+  if (!dims) {
+    return { logicalWidth: windowSize.width, logicalHeight: windowSize.height, resolution: 1 }
+  }
+  if (preset === 'vertical' || preset === 'square') {
+    return { logicalWidth: dims.width, logicalHeight: dims.height, resolution: 1 }
+  }
+  // Landscape presets share one 16:9 logical stage; only the sharpness varies.
+  return {
+    logicalWidth: LANDSCAPE_LOGICAL.width,
+    logicalHeight: LANDSCAPE_LOGICAL.height,
+    resolution: dims.width / LANDSCAPE_LOGICAL.width,
   }
 }

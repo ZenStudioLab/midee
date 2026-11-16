@@ -4,7 +4,8 @@ import './styles/main.css'
 // `dist/assets/` as a long-cacheable hashed asset. Compared to
 // fonts.googleapis.com + fonts.gstatic.com, this saves the cross-origin
 // DNS+TLS chain Lighthouse measures as ~360 ms render-blocking on first
-// load. `latin-` subsets cover en/es/fr/pt-BR — our shipped locales.
+// load. The bundled `latin-` subsets cover the Latin-script locales we ship;
+// `zh-CN` and `ja` fall back to system CJK fonts via CSS.
 import '@fontsource/inter/latin-400.css'
 import '@fontsource/inter/latin-500.css'
 import '@fontsource/inter/latin-600.css'
@@ -16,12 +17,21 @@ import '@fontsource/jetbrains-mono/latin-500.css'
 import '@fontsource/jetbrains-mono/latin-600.css'
 import { render } from 'solid-js/web'
 import { AppRoot } from './AppRoot'
+import { justReloadedForStaleChunk, reloadForStaleChunk } from './core/staleChunk'
 import { createApp } from './createApp'
 import { env } from './env'
 import { currentLocaleNativeName, initI18n, shouldShowLocaleHint, t } from './i18n'
 import { AppCtx } from './store/AppCtx'
 import { loadPostHog, registerAnalyticsContext } from './telemetry'
+import { installSkipLink } from './ui/SkipLink'
+import { showToast } from './ui/Toast'
 import { whenIdle } from './whenIdle'
+
+// Vite fires this when a dynamic import's chunk (or its preloaded deps) fails
+// to fetch — typically a tab that outlived a deploy. See core/staleChunk.ts.
+window.addEventListener('vite:preloadError', (event) => {
+  if (reloadForStaleChunk(event.payload)) event.preventDefault()
+})
 
 // Both analytics SDKs are loaded on idle so they don't sit in the initial
 // bundle. PostHog alone is ~70 KB gz with autocapture / session_recording /
@@ -50,6 +60,7 @@ whenIdle(() => {
 async function boot(): Promise<void> {
   await initI18n()
   const { ctx } = await createApp()
+  installSkipLink(() => ctx.store.state.mode)
   // Solid owns a dedicated child of #ui-overlay so its render() call doesn't
   // wipe the legacy UI (Controls, DropZone, TrackPanel, modals) that the
   // wrapped App class has already mounted into #ui-overlay directly.
@@ -69,6 +80,7 @@ async function boot(): Promise<void> {
   // Subtle one-time onboarding for users whose browser language was
   // auto-detected to a non-English locale.
   if (shouldShowLocaleHint()) showLocaleHint()
+  if (justReloadedForStaleChunk()) showToast(t('toast.updated'), 'toast toast--success', 2500)
 
   // Bench runner is a build-time opt-in. `npm run bench` sets
   // VITE_ENABLE_BENCH=1; public prod builds don't, so Vite constant-folds the
@@ -77,16 +89,8 @@ async function boot(): Promise<void> {
   // `?bench=...` URLs are inert in prod. Read `import.meta.env` directly (not
   // through env.ts) so the value is statically inlined for the dead-code pass.
   if (import.meta.env.VITE_ENABLE_BENCH) {
-    const { benchFixtureFromUrl, runBench } = await import('./bench/runner')
-    const fixture = benchFixtureFromUrl()
-    if (fixture) {
-      try {
-        window.__BENCH_RESULT = await runBench(fixture, ctx)
-      } catch (err) {
-        window.__BENCH_ERROR = err instanceof Error ? err.message : String(err)
-        console.error('[bench]', err)
-      }
-    }
+    const { maybeRunBench } = await import('./bench/runner')
+    await maybeRunBench(ctx)
   }
 }
 

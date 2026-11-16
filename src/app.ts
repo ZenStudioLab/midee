@@ -1,30 +1,41 @@
 import { Metronome } from './audio/Metronome'
-import { INSTRUMENTS, SynthEngine } from './audio/SynthEngine'
+import { INSTRUMENTS, type InstrumentId, SynthEngine } from './audio/SynthEngine'
 import { MasterClock } from './core/clock/MasterClock'
 import { type BusNoteEvent, InputBus } from './core/input/InputBus'
 import { lazyHandle } from './core/lazyHandle'
-import { parseMidiFile } from './core/midi/parser'
+import { parseMidiFileWithStats } from './core/midi/parser'
+import type { MidiFile } from './core/midi/types'
 import { detectChord } from './core/music/ChordDetector'
 import {
   createLivePerformanceBus,
   type LivePerformanceBus,
 } from './core/performance/LivePerformanceBus'
-import { booleanPersisted, indexPersisted, numberPersisted } from './core/persistence'
+import { booleanPersisted, idPersisted, numberPersisted } from './core/persistence'
+import { forgetRecent, readRecentMidi, rememberRecent } from './core/recentMidi'
 import { fetchSampleMidi, getSample } from './core/samples'
 import type { AppServices } from './core/services'
-import {
-  fitPitchRange,
-  pitchSignature,
-  resolveExportBitrate,
-  resolveExportDims,
-  speedToPps,
-  trimAudioBuffer,
-} from './export/exportMath'
 // VideoExporter pulls Mediabunny; OfflineAudioRenderer pulls Tone + instruments.
 // Both are dynamic-imported from startExport(). Import order matters: load the
 // offline-audio module first when audio is needed — do not block Tone on the
 // heavy VideoExporter chunk (see Promise.all removal below).
-import type { VideoExporter } from './export/VideoExporter'
+import { downloadBlob } from './export/download'
+import { encoderPrewarmMs, prewarmVideoEncoder } from './export/encoderWarmup'
+import {
+  exportFraming,
+  pitchSignature,
+  resolveExportBitrate,
+  resolveExportRender,
+  trimAudioBuffer,
+} from './export/exportMath'
+// Dependency-free (no Mediabunny): the boot sweep and the storage error type.
+import {
+  ExportStorageError,
+  type MemorySinkReason,
+  type OutputSinkKind,
+  sweepExportFiles,
+} from './export/opfsExports'
+import type { ExportStage, VideoExporter } from './export/VideoExporter'
+import { audioBufferToWav } from './export/wav'
 import { setLocale, t } from './i18n'
 import { CaptureFanout } from './midi/CaptureFanout'
 import { ComputerKeyboardInput } from './midi/ComputerKeyboardInput'
@@ -38,13 +49,16 @@ import { sessionToMidiFile } from './midi/SessionToMidi'
 import type { LearnController } from './modes/LearnController'
 import { setNextLiveOpts } from './modes/LiveMode'
 import { MODE_CAPTURES_LIVE, type ModeContext } from './modes/ModeController'
-import { PARTICLE_STYLES } from './renderer/ParticleSystem'
 import { PianoRollRenderer } from './renderer/PianoRollRenderer'
-import { THEMES, type Theme } from './renderer/theme'
+import { ALL_PARTICLE_STYLES, PARTICLE_STYLES, type ParticleStyle } from './renderer/particleStyles'
+import { ALL_THEMES, accentCSS, THEMES, type Theme, type ThemeId } from './renderer/theme'
 import type { AppMode, AppStore } from './store/state'
 import { watch } from './store/watch'
 import {
   categorizeMidiDevice,
+  clearExportInflight,
+  consumeInterruptedExport,
+  markExportInflight,
   midiLoadErrorType,
   track,
   trackActivation,
@@ -52,6 +66,7 @@ import {
   trackEventSettled,
   trackMidiLoaded,
   trackMidiLoadFailed,
+  webglRendererName,
 } from './telemetry'
 import { ChordOverlay } from './ui/ChordOverlay'
 import { Controls } from './ui/Controls'
@@ -62,9 +77,11 @@ import { DropZone } from './ui/DropZone'
 // below so their JSX stays out of the initial bundle. The static side keeps
 // the type imports for signatures.
 import type { ExportSettings } from './ui/ExportModal'
+import { THROUGHPUT_KEY, throughputFrom } from './ui/exportSettings'
 import { InstrumentMenu } from './ui/InstrumentMenu'
 import { KeyboardResizer } from './ui/KeyboardResizer'
 import type { SessionAction } from './ui/PostSessionModal'
+import { PEDAL_HIDDEN, type PedalIndicatorState, pedalIndicatorState } from './ui/pedalIndicator'
 import { showError, showSuccess } from './ui/Toast'
 import { TrackPanel } from './ui/TrackPanel'
 import { installViewportClassSync } from './ui/utils'
@@ -113,7 +130,35 @@ export class App {
   trackPanel!: TrackPanel
   private exportHandle = lazyHandle(() =>
     import('./ui/ExportModal').then(({ ExportModal }) => {
-      const m = new ExportModal(this.overlay)
+      const m = new ExportModal(this.overlay, {
+        pieceDuration: () => this.store.state.loadedMidi?.duration ?? 0,
+        canvasSize: () => this.renderer.canvasSize,
+        piece: () => this.store.state.loadedMidi,
+        instrumentName: () => t(INSTRUMENTS[this.instrumentIndex]!.nameKey),
+        // One real frame at the chosen size/framing, a quarter into the piece
+        // so there are notes on screen.
+        renderPreview: (settings, maxWidth) => {
+          const midi = this.store.state.loadedMidi
+          if (!midi) return Promise.resolve(null)
+          // Same fixed-logical-stage plan the real export uses, so the
+          // preview's proportions match the file the user gets.
+          const plan = resolveExportRender(settings.resolution, {
+            width: window.innerWidth,
+            height: window.innerHeight,
+            resolution: this.renderer.canvasSize.resolution,
+          })
+          return this.renderer.renderPreview({
+            width: plan.logicalWidth,
+            height: plan.logicalHeight,
+            // Layout depends only on the logical size, so render no denser
+            // than the thumbnail needs — a 4K preview is a 640px picture.
+            resolution: Math.min(plan.resolution, maxWidth / plan.logicalWidth),
+            time: midi.duration * 0.25,
+            maxWidth,
+            ...exportFraming(settings, midi),
+          })
+        },
+      })
       m.onStart = (settings) => void this.startExport(settings)
       m.onCancel = () => this.cancelExport()
       return m
@@ -154,16 +199,20 @@ export class App {
   private chordLastRunMs = 0
   private chordLastSig = ''
   private chordOverlayOn = false
+  private noteLabelsOn = false
 
-  private themeIndex = themeIndexStore.load()
-  private instrumentIndex = instrumentIndexStore.load()
-  private particleIndex = particleIndexStore.load()
+  private themeIndex = indexOfId(THEMES, themeStore.load())
+  private instrumentIndex = indexOfId(INSTRUMENTS, instrumentStore.load())
+  private particleIndex = indexOfId(PARTICLE_STYLES, particleStore.load())
   private audioPrimed = false
   // Analytics one-shot flags. Reset when a new file is loaded so a user
   // who opens MIDI A then MIDI B gets `first_play` events for both.
   private firstPlayLogged = false
   private firstLiveNoteLogged = false
   private firstPedalLogged = false
+  // Last state pushed to the top-strip pedal chip; `syncPedalIndicator`
+  // recomputes on every clock tick and only touches the UI on a change.
+  private pedalShown: PedalIndicatorState = PEDAL_HIDDEN
   private playbackMilestones = new Set<number>()
   // Loop station one-shots, scoped to the page session. We want to know
   // whether users ever reach each step in the loop funnel, not count every
@@ -187,6 +236,22 @@ export class App {
   private unsubs: Array<() => void> = []
 
   async init(): Promise<void> {
+    // If the previous session died mid-export (OOM, tab kill), its in-flight
+    // marker is still in localStorage — surface it as export_interrupted so
+    // silent export deaths show up in the funnel.
+    const interrupted = consumeInterruptedExport()
+    if (interrupted) {
+      trackEvent('export_interrupted', {
+        stage: interrupted.stage,
+        pct: Math.round(interrupted.pct * 100) / 100,
+        output: interrupted.output,
+        resolution: interrupted.resolution,
+        fps: interrupted.fps,
+        age_s: Math.max(0, Math.round((Date.now() - interrupted.ts) / 1000)),
+        output_sink: interrupted.sink ?? null,
+      })
+    }
+
     const canvas = document.querySelector<HTMLCanvasElement>('#pianoroll')!
     const overlay = document.querySelector<HTMLElement>('#ui-overlay')!
     this.overlay = overlay
@@ -201,7 +266,12 @@ export class App {
     this.renderer.setLoopNoteStore(this.loopNotes)
 
     this.midiInput = new MidiInputManager(this.clock)
-    this.keyboardInput = new ComputerKeyboardInput(this.clock)
+    // Space is the sustain pedal only in Live; Play and Learn own it as the
+    // transport / exercise key.
+    this.keyboardInput = new ComputerKeyboardInput(
+      this.clock,
+      () => this.store.state.mode === 'live',
+    )
 
     this.liveLooper = new LiveLooper(
       this.clock,
@@ -227,7 +297,10 @@ export class App {
         },
       },
       // Bar-snap when the metronome is running — rounds loop length to the
-      // nearest whole bar at current BPM (4/4). Off → freeform length.
+      // nearest whole bar at the metronome's BPM (4/4, like its click). The
+      // looper only runs in Live mode, where the click is the only pulse the
+      // player hears; a file that happens to be loaded is not playing and
+      // must not define the bar. Off → freeform length.
       (raw) => {
         if (!this.metronome.running.value) return raw
         const secPerBar = (60 / this.metronome.bpm.value) * 4
@@ -303,6 +376,13 @@ export class App {
         }
       },
       () => this.store.setState('mode', 'learn'),
+      (recentId) => {
+        if (this.store.state.mode === 'learn') {
+          void this.ensureLearnController().then((c) => c.loadRecent(recentId))
+        } else {
+          void this.loadRecent(recentId)
+        }
+      },
     )
 
     this.controls = new Controls({
@@ -313,6 +393,7 @@ export class App {
         this.liveNotes.reset()
       },
       onZoom: (pps) => this.renderer.setZoom(pps),
+      onTranspose: (semitones) => this.applyTranspose(semitones),
       onThemeCycle: () => this.cycleTheme(),
       onMidiConnect: () => void this.connectMidi(),
       onOpenTracks: () => this.trackPanel.toggle(),
@@ -328,19 +409,25 @@ export class App {
       onHome: () => this.enterHomeMode(),
       onInstrumentCycle: () => this.cycleInstrument(),
       onParticleCycle: () => this.cycleParticleStyle(),
-      onLoopToggle: () => this.liveLooper.toggle(),
-      onLoopClear: () => {
+      onLoopToggle: (method) => {
+        trackEvent('live_action', { action: 'loop_toggle', method })
+        this.liveLooper.toggle()
+      },
+      onLoopClear: (method) => {
+        trackEvent('live_action', { action: 'loop_clear', method })
         const layers = this.liveLooper.layerCount.value
         this.liveLooper.clear()
         if (layers > 0) track('loop_cleared', { layers })
       },
       onLoopSave: () => void this.saveLoopAsMidi(),
-      onLoopUndo: () => {
+      onLoopUndo: (method) => {
+        trackEvent('live_action', { action: 'loop_undo', method })
         const before = this.liveLooper.layerCount.value
         this.liveLooper.undo()
         if (before > 0) track('loop_undone', { layers_before: before })
       },
-      onMetronomeToggle: () => {
+      onMetronomeToggle: (method) => {
+        trackEvent('live_action', { action: 'metronome', method })
         this.metronome.toggle()
         trackEvent('metronome_toggled', { on: this.metronome.running.value })
       },
@@ -349,7 +436,10 @@ export class App {
         metronomeBpmStore.save(this.metronome.bpm.value)
         trackEventSettled('tempo_changed', { bpm: this.metronome.bpm.value })
       },
-      onSessionToggle: () => this.toggleSessionRecord(),
+      onSessionToggle: (method) => {
+        trackEvent('live_action', { action: 'record', method })
+        this.toggleSessionRecord()
+      },
       onChordToggle: () => this.toggleChordOverlay(),
       onOctaveShift: (delta) => {
         if (delta < 0) this.keyboardInput.shiftOctaveDown()
@@ -402,6 +492,7 @@ export class App {
         trackEvent('track_toggled', { enabled })
       },
       () => this.openFilePicker(),
+      (id) => !this.synth.getDisabledTrackIds().has(id),
     )
     this.trackPanel.setTrigger(this.controls.tracksButton)
 
@@ -442,7 +533,7 @@ export class App {
       ),
     )
 
-    // Customization popover bundles theme / particles / chord toggle —
+    // Customization popover bundles theme / particles / chord toggle -
     // collapses three topbar pills into a single trigger.
     this.customizeMenu = new CustomizeMenu(
       this.controls.customizeSlot,
@@ -450,9 +541,10 @@ export class App {
       THEMES,
       PARTICLE_STYLES,
       {
-        onSelectTheme: (idx) => this.setThemeByIndex(idx),
-        onSelectParticle: (idx) => this.setParticleByIndex(idx),
+        onSelectTheme: (idx) => this.setThemeByIndex(idx, 'menu'),
+        onSelectParticle: (idx) => this.setParticleByIndex(idx, 'menu'),
         onToggleChord: () => this.toggleChordOverlay(),
+        onToggleNoteLabels: () => this.toggleNoteLabels(),
         // Locale change is rare, and almost every part of the UI was built
         // with the previous locale baked in via template literals. Reload
         // is the simplest correct path: persistence happens in setLocale,
@@ -464,6 +556,10 @@ export class App {
       },
     )
     this.customizeMenu.setChord(this.chordOverlayOn)
+
+    this.noteLabelsOn = noteLabelsStore.load()
+    this.renderer.setNoteLabels(this.noteLabelsOn)
+    this.customizeMenu.setNoteLabels(this.noteLabelsOn)
 
     this.applyTheme(THEMES[this.themeIndex]!)
     this.applyInstrument()
@@ -480,18 +576,32 @@ export class App {
     //   • LearnController (only when Learn is enabled) → first Learn entry
     whenIdle(() => this.synth.preloadDefault())
     whenIdle(() => void import('@tonejs/midi'))
+    // Chunk-only prefetch: failures are harmless (the click path goes through
+    // lazyHandle, which retries or reloads a stale tab), so swallow them
+    // rather than surfacing unhandled rejections.
+    const prefetch = (p: Promise<unknown>) => p.catch(() => {})
     whenIdle(() => {
-      void import('./ui/ExportModal')
-      void import('./ui/PostSessionModal')
-      void import('./ui/MidiPickerModal')
+      prefetch(import('./ui/ExportModal'))
+      prefetch(import('./ui/PostSessionModal'))
+      prefetch(import('./ui/MidiPickerModal'))
     })
-    whenIdle(() => void this.ensureLearnController())
+    whenIdle(() => prefetch(import('./modes/LearnController')))
+    // Other sessions' stale OPFS export files (killed tabs, old downloads).
+    // Never rejects; a no-op where OPFS export isn't available.
+    whenIdle(() => void sweepExportFiles())
 
     this.controls.updateMidiStatus(this.midiInput.status.value, '')
     this.dropzone.updateMidiStatus(this.midiInput.status.value, '')
 
     this.unsubs.push(
       this.clock.subscribe((t) => {
+        // Export drives this same clock via seek() at frame cadence — those
+        // emissions are the encoder sweeping the timeline, not the user
+        // watching. Without this gate a load→export flow logs the 30/60/120s
+        // milestones (and the playback_30s activation) for a piece nobody
+        // played back.
+        if (this.store.state.status === 'exporting') return
+        this.syncPedalIndicator(t)
         // Engagement milestones are mode-agnostic (watched ≥30s counts as
         // a real user regardless of where the clock was ticking).
         for (const m of [30, 60, 120]) {
@@ -535,6 +645,14 @@ export class App {
         () => this.store.state.volume,
         (v) => this.synth.setVolume(v),
       ),
+      // Pedal chip: a mode switch or a new piece changes which holds apply;
+      // the player's own pedal fires straight from the bus. Time-driven
+      // changes ride the clock tick above.
+      watch(
+        () => [this.store.state.mode, this.store.state.loadedMidi] as const,
+        () => this.syncPedalIndicator(),
+      ),
+      this.performanceBus.subscribePedal(() => this.syncPedalIndicator()),
       watch(
         () => this.store.state.speed,
         (s) => {
@@ -609,6 +727,7 @@ export class App {
       this.midiInput.status.subscribe((status) => {
         this.controls.updateMidiStatus(status, this.midiInput.deviceName.value)
         this.dropzone.updateMidiStatus(status, this.midiInput.deviceName.value)
+        this.syncPedalIndicator()
         if (status === 'connected') {
           // Vendor enum instead of raw device name — cardinality-friendly and
           // avoids leaking user-customised device labels.
@@ -639,7 +758,11 @@ export class App {
       resetInteractionState: () => this.resetInteractionState(),
       openFilePicker: () => this.openFilePicker(),
       primeInteractiveAudio: () => this.primeInteractiveAudio(),
-      setLearnFileName: (name) => this.controls.updateLearnFileName(name),
+      setLearnFileName: (name) => {
+        this.controls.updateLearnFileName(name)
+        // Learn's piece lives on LearnState, outside the store watch below.
+        this.syncPedalIndicator()
+      },
     }
 
     // Start in home. <HomeMode/>'s onMount handles the side effects.
@@ -801,8 +924,63 @@ export class App {
     await this.midiInput.requestAccess({ silent: true })
   }
 
-  // Play-mode MIDI loader. Learn has its own loader on LearnController that
-  // never touches AppState — see the mode dispatch at the DropZone callback.
+  // Recomputes the top-strip pedal chip from whatever can hold the pedal right
+  // now — the current mode's piece at `time`, and the player's own pedal —
+  // and pushes it only when it changed. Cheap enough for every clock tick:
+  // one binary search over the piece's holds.
+  private syncPedalIndicator(time = this.clock.currentTime): void {
+    const mode = this.store.state.mode
+    const piece =
+      mode === 'play'
+        ? this.store.state.loadedMidi
+        : mode === 'learn'
+          ? (this.learnControllerHandle.peek()?.learnState.state.loadedMidi ?? null)
+          : null
+    const next = pedalIndicatorState({
+      pieceHolds: piece?.pedal,
+      time,
+      liveDown: this.performanceBus.pedalDown,
+      midiConnected: this.midiInput.status.value === 'connected',
+      // The bus fires before `firstPedalLogged` is set on the very first
+      // press; read the live state too so that press shows the chip.
+      liveEverUsed: this.firstPedalLogged || this.performanceBus.pedalDown,
+    })
+    if (next.visible === this.pedalShown.visible && next.down === this.pedalShown.down) return
+    this.pedalShown = next
+    this.controls.updatePedal(next)
+  }
+
+  // Transpose re-derives `loadedMidi` from `sourceMidi` and pushes the result
+  // down the same three paths a load uses — renderer, synth, scheduler. The
+  // renderer half is free: `store.setTranspose` writes a NEW loadedMidi object,
+  // which re-fires <PlayMode/>'s effect (renderer.loadMidi + trackPanel.render)
+  // synchronously before this method continues.
+  //
+  // One thing a load resets and a transpose must not: the muted tracks
+  // (`synth.load` clears them, `renderer.loadMidi` re-shows every track), so
+  // the mute set is restored right after.
+  private applyTranspose(semitones: number): void {
+    if (this.store.state.mode !== 'play' || this.store.state.sourceMidi === null) return
+    const before = this.store.state.transpose
+    const next = this.store.setTranspose(semitones)
+    if (next === before) return
+    trackEventSettled('transpose_changed', { semitones: next })
+
+    const midi = this.store.state.loadedMidi
+    if (!midi) return
+    const muted = [...this.synth.getDisabledTrackIds()]
+    this.synth.load(midi).catch((err) => console.error('SynthEngine.load failed:', err))
+    for (const id of muted) {
+      this.synth.setTrackEnabled(id, false)
+      this.renderer.setTrackVisible(id, false)
+    }
+    // Rebuilds the Tone.Part from the new pitches. If the transport is running
+    // it restarts at the same instant, so a transpose mid-playback is seamless;
+    // if it isn't, this just drops the stale schedule.
+    this.synth.seek(this.clock.currentTime)
+    this.liveNotes.reset()
+  }
+
   private async loadMidi(file: File, source: 'drag' | 'picker' = 'picker'): Promise<void> {
     const previousMode = this.store.state.mode
     const previousMidi = this.store.state.loadedMidi
@@ -812,18 +990,28 @@ export class App {
     this.showLoading()
 
     try {
-      const midi = await parseMidiFile(file)
+      const { midi, stats } = await parseMidiFileWithStats(file)
+      trackEvent('midi_parse_quality', {
+        target: 'play',
+        out_of_range_notes: stats.outOfRangeNotes,
+        has_sustain_pedal: stats.hasSustainPedal,
+        tempo_events: stats.tempoEvents,
+      })
+      // completePlayLoad flips mode to 'play'; <PlayMode/>'s effect then
+      // drives renderer.loadMidi, trackPanel.render, document.title, and
+      // dropzone.hide off the new loadedMidi.
+      this.store.completePlayLoad(midi)
       this.synth.load(midi).catch((err) => {
         console.error('SynthEngine.load failed:', err)
         // Visuals load but there's no sound — a silent session-killer that
         // produced zero telemetry before.
         trackEvent('synth_load_failed', { source })
       })
-      // completePlayLoad flips mode to 'play'; <PlayMode/>'s effect then
-      // drives renderer.loadMidi, trackPanel.render, document.title, and
-      // dropzone.hide off the new loadedMidi.
-      this.store.completePlayLoad(midi)
       this.resetPlaybackTelemetry()
+      // Recorded only on the success path, so a file the parser choked on
+      // never comes back as a recent card. Fire-and-forget by design —
+      // storage failures must not touch the load.
+      void rememberRecent(file, midi)
       trackMidiLoaded({
         source,
         trackCount: midi.tracks.length,
@@ -831,6 +1019,8 @@ export class App {
         durationS: Math.round(midi.duration),
         fileSizeKb: Math.round(file.size / 1024),
       })
+      // Same treatment a card gets: you asked for this file, so it plays.
+      this.autoplayAfterLoad()
     } catch (err) {
       console.error('Failed to load MIDI:', err)
       // Bucket the cause (not free-text — cardinality + PII) so we can see
@@ -842,6 +1032,11 @@ export class App {
         fileSizeKb: Math.round(file.size / 1024),
       })
       if (previousMode === 'play' && previousMidi) {
+        // Manual surface restore — the one place that can't lean on
+        // <PlayMode/>'s effect: `loadedMidi` still holds the same
+        // `previousMidi` reference (beginPlayLoad doesn't clear it), so the
+        // effect never re-fires, yet clearMidi() above already wiped the
+        // renderer.
         this.store.enterPlay()
         this.renderer.loadMidi(previousMidi)
         this.trackPanel.render(previousMidi)
@@ -861,22 +1056,34 @@ export class App {
   }
 
   private cycleTheme(): void {
-    this.setThemeByIndex((this.themeIndex + 1) % THEMES.length)
+    this.setThemeByIndex((this.themeIndex + 1) % THEMES.length, 'cycle')
   }
 
-  private setThemeByIndex(idx: number): void {
-    if (idx < 0 || idx >= THEMES.length || idx === this.themeIndex) return
+  private setThemeByIndex(idx: number, method: 'cycle' | 'menu'): void {
+    if (idx < 0 || idx >= THEMES.length) return
     this.themeIndex = idx
-    this.applyTheme(THEMES[idx]!)
-    themeIndexStore.save(idx)
-    trackEvent('theme_changed', { theme: THEMES[idx]!.name })
+    const theme = THEMES[idx]!
+    // A material theme is a complete visual preset. Selecting it also restores
+    // its authored particles, even from Off or when reselecting the same theme.
+    // The particle picker can still override that choice afterwards.
+    if (theme.recommendedParticles) {
+      this.setParticleByIndex(
+        PARTICLE_STYLES.findIndex((p) => p.id === theme.recommendedParticles),
+        method,
+      )
+    }
+    // Present the new surface only after the old effect has been cleared, so
+    // a paused preview cannot retain particles belonging to the previous theme.
+    this.applyTheme(theme)
+    themeStore.save(theme.id)
+    trackEvent('theme_changed', { theme: theme.name, theme_id: theme.id, method })
   }
 
   private cycleInstrument(): void {
     const from = INSTRUMENTS[this.instrumentIndex]?.id
     this.instrumentIndex = (this.instrumentIndex + 1) % INSTRUMENTS.length
     this.applyInstrument()
-    instrumentIndexStore.save(this.instrumentIndex)
+    instrumentStore.save(INSTRUMENTS[this.instrumentIndex]!.id)
     trackEvent('instrument_changed', {
       from,
       to: INSTRUMENTS[this.instrumentIndex]!.id,
@@ -890,27 +1097,27 @@ export class App {
     const from = INSTRUMENTS[this.instrumentIndex]?.id
     this.instrumentIndex = idx
     this.applyInstrument()
-    instrumentIndexStore.save(this.instrumentIndex)
+    instrumentStore.save(INSTRUMENTS[idx]!.id)
     trackEvent('instrument_changed', { from, to: id, method: 'menu' })
   }
 
   private applyInstrument(): void {
     const info = INSTRUMENTS[this.instrumentIndex]!
-    this.controls.updateInstrument(info.name)
+    this.controls.updateInstrument(t(info.nameKey))
     this.instrumentMenu?.setCurrent(info.id)
     void this.synth.setInstrument(info.id)
   }
 
   private cycleParticleStyle(): void {
-    this.setParticleByIndex((this.particleIndex + 1) % PARTICLE_STYLES.length)
+    this.setParticleByIndex((this.particleIndex + 1) % PARTICLE_STYLES.length, 'cycle')
   }
 
-  private setParticleByIndex(idx: number): void {
+  private setParticleByIndex(idx: number, method: 'cycle' | 'menu'): void {
     if (idx < 0 || idx >= PARTICLE_STYLES.length || idx === this.particleIndex) return
     this.particleIndex = idx
     this.applyParticleStyle()
-    particleIndexStore.save(idx)
-    trackEvent('particle_changed', { style: PARTICLE_STYLES[idx]!.id })
+    particleStore.save(PARTICLE_STYLES[idx]!.id)
+    trackEvent('particle_changed', { style: PARTICLE_STYLES[idx]!.id, method })
   }
 
   private applyParticleStyle(): void {
@@ -932,6 +1139,29 @@ export class App {
     // One settings shape shared across started / completed / failed so the
     // funnel can be sliced by social-format settings without a join. `stage`
     // is advanced as the pipeline progresses and reported on failure.
+    // Hardware fields are the join key for "which devices fail/crawl" — the
+    // 90d data showed completion rates of 90% (Mac) down to 0% (Linux) with
+    // no way to correlate against device capability.
+    const nav = navigator as Navigator & { deviceMemory?: number }
+    const isVideoOutput = settings.output === 'av' || settings.output === 'video-only'
+    // Fixed LOGICAL stage + a `resolution` multiplier for the pixels. Every
+    // renderer constant (keyboard height, glow, line widths) is in logical px,
+    // so sizing the logical canvas to 4K would shrink the whole layout instead
+    // of sharpening it. Resolved once here so telemetry reports the same pixel
+    // size the encoder will actually see.
+    const renderPlan = isVideoOutput
+      ? resolveExportRender(settings.resolution, {
+          width: window.innerWidth,
+          height: window.innerHeight,
+          resolution: this.renderer.canvasSize.resolution,
+        })
+      : null
+    const planPixels = renderPlan
+      ? {
+          width: Math.round(renderPlan.logicalWidth * renderPlan.resolution),
+          height: Math.round(renderPlan.logicalHeight * renderPlan.resolution),
+        }
+      : null
     const exportBase = {
       output: settings.output,
       resolution: settings.resolution,
@@ -939,8 +1169,21 @@ export class App {
       focus: settings.focus,
       speed: settings.speed,
       midi_duration_s: Math.round(midi.duration),
+      hardware_concurrency: nav.hardwareConcurrency ?? null,
+      device_memory: nav.deviceMemory ?? null,
+      export_w: planPixels?.width ?? null,
+      export_h: planPixels?.height ?? null,
+      // What the frame costs on this device: the GPU, and the look (theme
+      // sets the glow — about half the render on weak GPUs — particles and
+      // labels add draw work; instrument sets the offline audio render).
+      gpu: webglRendererName(),
+      theme: THEMES[this.themeIndex]?.id ?? null,
+      particles: PARTICLE_STYLES[this.particleIndex]?.id ?? null,
+      note_labels: this.noteLabelsOn,
+      instrument: INSTRUMENTS[this.instrumentIndex]?.id ?? null,
     }
     let exportStage: 'serialize' | 'audio_render' | 'video_encode' = 'serialize'
+
     track('export_started', exportBase)
     trackActivation('export_started')
 
@@ -948,7 +1191,12 @@ export class App {
     // loaded MidiFile to .mid bytes. Especially useful after "Open in file
     // mode" from a live session, where the raw .mid was never downloaded.
     if (settings.output === 'midi') {
-      const bytes = await midiFileToBytes(midi)
+      // The only "download MIDI" path for a loaded file, and the one place
+      // that must NOT follow the derive step: transpose is a playback
+      // setting, so the .mid the user gets back carries the pitches their
+      // file actually contained. Audio/video below deliberately
+      // export `midi` — the derived file is what you hear and see.
+      const bytes = await midiFileToBytes(this.store.state.sourceMidi ?? midi)
       triggerMidiDownload(bytes, `${sanitiseFilename(midi.name)}.mid`)
       exportModal.close()
       this.showSuccess(`↓ ${sanitiseFilename(midi.name)}.mid`)
@@ -957,6 +1205,51 @@ export class App {
         elapsed_ms: Math.round(performance.now() - exportStartedAt),
       })
       return
+    }
+
+    // Progress fan-out: drive the modal AND keep crash forensics fresh. The
+    // localStorage marker is rewritten on stage changes and every ≥10% of
+    // stage progress; if the tab dies mid-export, the next boot reports the
+    // last persisted position via export_interrupted (see init()).
+    let lastStage: ExportStage | 'start' = 'start'
+    let lastPct = 0
+    let lastPersistedPct = -1
+    // Where the current attempt's MP4 is being assembled (OPFS file or memory;
+    // see opfsExports.ts). Boxed like codecInfo below: set in a callback.
+    // Rides the in-flight marker so export_interrupted says which one died.
+    const sinkInfo: { current: { kind: OutputSinkKind; reason: MemorySinkReason | null } | null } =
+      { current: null }
+    const onExportProgress = (stage: ExportStage, pct: number): void => {
+      if (stage !== lastStage || pct - lastPersistedPct >= 0.1) {
+        lastPersistedPct = pct
+        markExportInflight({
+          stage,
+          pct: Math.round(pct * 100) / 100,
+          output: settings.output,
+          resolution: settings.resolution,
+          fps: settings.fps,
+          ts: Date.now(),
+          sink: sinkInfo.current?.kind ?? null,
+        })
+      }
+      lastStage = stage
+      lastPct = pct
+      exportModal.updateProgress(stage, pct)
+    }
+    markExportInflight({
+      stage: 'start',
+      pct: 0,
+      output: settings.output,
+      resolution: settings.resolution,
+      fps: settings.fps,
+      ts: Date.now(),
+    })
+
+    // Which encoder plan is live (for failure telemetry — on success the
+    // exporter returns the same info in its stats). Boxed because it's only
+    // ever assigned inside the onPlan callback, which TS's narrowing can't see.
+    const codecInfo: { current: { codec: string; hw: string; attempts: number } | null } = {
+      current: null,
     }
 
     const wasPlaying = this.store.state.status === 'playing'
@@ -968,19 +1261,36 @@ export class App {
     this.synth.liveReleaseAll()
     this.store.setState('status', 'exporting')
     this.synth.pause()
+    // The metronome schedules clicks on its own look-ahead timer against the
+    // *global* Tone context — left running, it would keep scheduling straight
+    // through OfflineAudioRenderer's setContext() swap into the offline
+    // render. Stop it for the duration; restored in the finally below.
+    const metronomeWasRunning = this.metronome.running.value
+    this.metronome.stop()
     this.renderer.pauseAutoRender()
+
+    // A lost WebGL context mid-export (typical on weak GPUs at 4K) previously
+    // produced either black frames or an opaque encoder error. Fail fast with
+    // a distinct error instead; the flag overrides the AbortError that
+    // cancel() raises so this is reported as a failure, not a user cancel.
+    let glContextLost = false
+    const onGlContextLost = (e: Event): void => {
+      e.preventDefault()
+      glContextLost = true
+      this.currentExporter?.cancel()
+    }
+    this.renderer.canvas.addEventListener('webglcontextlost', onGlContextLost)
 
     const needsVideo = settings.output !== 'audio-only'
     const needsAudio = settings.output !== 'video-only'
 
-    // Only resize the canvas when we're actually rendering video.
+    // Only resize the canvas when we're actually rendering video (renderPlan is
+    // null otherwise). Always resize — and always restore in the finally —
+    // rather than diffing against the current canvas: a same-pixel-size canvas
+    // can still need a different logical size / resolution pair.
     const originalCanvas = this.renderer.canvasSize
-    const target = needsVideo ? resolveExportDims(settings.resolution) : null
-    const resized =
-      target !== null &&
-      (target.width !== originalCanvas.width || target.height !== originalCanvas.height)
-    if (resized) {
-      this.renderer.resize(target.width, target.height, 1)
+    if (renderPlan) {
+      this.renderer.resize(renderPlan.logicalWidth, renderPlan.logicalHeight, renderPlan.resolution)
     }
 
     // Snapshot viewport state so we can restore after export. Vertical/Square
@@ -988,53 +1298,77 @@ export class App {
     // speed for a more cinematic feel; landscape exports leave both untouched.
     const originalPps = this.renderer.currentPixelsPerSecond
     const originalRange = this.renderer.pitchRange
-    const isSocialFormat =
-      needsVideo && (settings.resolution === 'vertical' || settings.resolution === 'square')
+    const framing = needsVideo ? exportFraming(settings, midi) : {}
     let pitchChanged = false
     let ppsChanged = false
-    if (isSocialFormat) {
-      if (settings.focus === 'fit') {
-        const fit = fitPitchRange(midi)
-        this.renderer.setPitchRange(fit.min, fit.max)
-        pitchChanged = true
-      }
-      const pps = speedToPps(settings.speed)
-      if (pps !== originalPps) {
-        this.renderer.setZoom(pps)
-        ppsChanged = true
-      }
+    if (framing.pitchRange) {
+      this.renderer.setPitchRange(framing.pitchRange.min, framing.pitchRange.max)
+      pitchChanged = true
+    }
+    if (framing.pixelsPerSecond !== undefined && framing.pixelsPerSecond !== originalPps) {
+      this.renderer.setZoom(framing.pixelsPerSecond)
+      ppsChanged = true
     }
 
-    const filename = settings.output === 'audio-only' ? 'midee.m4a' : 'midee.mp4'
+    const filename =
+      settings.output === 'audio-only'
+        ? `${sanitiseFilename(midi.name)}.${settings.audioFormat}`
+        : `${sanitiseFilename(midi.name)}.mp4`
 
+    // One render config for both paths: sequential for audio-only, or handed
+    // to the exporter as a producer so it overlaps the video encode for av.
+    const renderAudio = async (report: (pct: number) => void): Promise<AudioBuffer> => {
+      const { renderAudioOffline } = await import('./audio/OfflineAudioRenderer')
+      return renderAudioOffline({
+        midi,
+        instrumentId: INSTRUMENTS[this.instrumentIndex]!.id,
+        volume: this.store.state.volume,
+        disabledTrackIds: this.synth.getDisabledTrackIds(),
+        onRenderAudioProgressMode: (d) => exportModal.setRenderAudioProgressMode(d),
+        onProgress: report,
+      })
+    }
+
+    let audioRenderMs = 0
     try {
       let audioBuffer: AudioBuffer | undefined
-      if (needsAudio) {
-        // Load without VideoExporter: that chunk embeds Mediabunny (~tens of kB
-        // parsed) and must not run before / in parallel with offline audio setup.
-        const { renderAudioOffline } = await import('./audio/OfflineAudioRenderer')
+      if (settings.output === 'audio-only') {
         exportStage = 'audio_render'
-        exportModal.updateProgress('Rendering audio', 0)
-        try {
-          // Per-stage progress: pct flows straight through. The bar resets
-          // between stages; the stage label makes that explicit.
-          audioBuffer = await renderAudioOffline({
-            midi,
-            instrumentId: INSTRUMENTS[this.instrumentIndex]!.id,
-            volume: this.store.state.volume,
-            disabledTrackIds: this.synth.getDisabledTrackIds(),
-            onRenderAudioProgressMode: (d) => exportModal.setRenderAudioProgressMode(d),
-            onProgress: (pct) => exportModal.updateProgress('Rendering audio', pct),
-          })
-        } catch (err) {
-          console.error('Offline audio render failed:', err)
-          // Audio-only has nothing to export without it — surface the error.
-          if (settings.output === 'audio-only') throw err
-          // av / video-only continue silently without sound — a real quality
-          // hit that was previously invisible. Mark it as a degradation.
-          trackEvent('export_degraded', { stage: 'audio_render', output: settings.output })
-          this.showError(t('error.audio.renderFailed'))
+        onExportProgress('Rendering audio', 0)
+        const audioRenderStart = performance.now()
+        // Nothing to export without it — surface the error.
+        audioBuffer = await renderAudio((pct) => onExportProgress('Rendering audio', pct))
+        audioRenderMs = Math.round(performance.now() - audioRenderStart)
+      }
+
+      // Audio-only ships WAV or MP3 — both are macOS-Gatekeeper-safe legacy audio
+      // types (unlike the MP4-container .m4a this replaced) and need no codec. Trim
+      // the offline render's tail to midi.duration first so the file isn't ~1.5s too
+      // long, then download directly — no VideoExporter. MP3's encoder (lamejs) is
+      // dynamic-imported so it stays out of the initial bundle.
+      if (settings.output === 'audio-only') {
+        if (!audioBuffer) throw new Error('Audio-only export requires a rendered audio buffer')
+        onExportProgress('Saving', 0)
+        const trimmed = trimAudioBuffer(audioBuffer, midi.duration)
+        let bytes: Uint8Array
+        let mime: string
+        if (settings.audioFormat === 'wav') {
+          bytes = audioBufferToWav(trimmed)
+          mime = 'audio/wav'
+        } else {
+          const { audioBufferToMp3 } = await import('./export/mp3')
+          bytes = audioBufferToMp3(trimmed)
+          mime = 'audio/mpeg'
         }
+        downloadBlob(new Blob([bytes.slice().buffer], { type: mime }), filename)
+        exportModal.close()
+        this.showSuccess(`↓ ${t('toast.export.ready', { filename })}`)
+        track('export_completed', {
+          ...exportBase,
+          elapsed_ms: Math.round(performance.now() - exportStartedAt),
+          audio_render_ms: audioRenderMs,
+        })
+        return
       }
 
       exportStage = 'video_encode'
@@ -1042,43 +1376,149 @@ export class App {
       const exporter = new VideoExporter(this.renderer.canvas)
       this.currentExporter = exporter
 
-      const exportAudio =
-        audioBuffer && settings.output === 'av'
-          ? trimAudioBuffer(audioBuffer, midi.duration)
-          : audioBuffer
-
-      await exporter.export({
+      const stats = await exporter.export({
         fps: settings.fps,
         duration: midi.duration,
         mode: settings.output,
         filename,
         bitrate: resolveExportBitrate(settings.resolution),
-        ...(exportAudio ? { audio: exportAudio } : {}),
+        ...(needsAudio
+          ? {
+              audio: async (report: (pct: number) => void) =>
+                trimAudioBuffer(await renderAudio(report), midi.duration),
+              // av continues without sound — a real quality hit that used to
+              // be invisible. Mark it as a degradation.
+              onAudioUnavailable: (stage) => {
+                trackEvent('export_degraded', { stage, output: settings.output })
+                this.showError(
+                  t(
+                    stage === 'audio_render'
+                      ? 'error.audio.renderFailed'
+                      : 'error.audio.encodeFailed',
+                  ),
+                )
+              },
+            }
+          : {}),
         onSeek: (t) => this.clock.seek(t),
         onRenderFrame: (t, dt) => this.renderer.renderManualFrame(t, dt),
-        onProgress: (stage, pct) => exportModal.updateProgress(stage, pct),
+        onProgress: onExportProgress,
+        onPlan: (info) => {
+          codecInfo.current = { codec: info.codec, hw: info.hw, attempts: info.attempt }
+        },
+        onSink: (info) => {
+          sinkInfo.current = info
+        },
+        onFallback: (info) =>
+          trackEvent('export_fallback', {
+            from_codec: info.fromCodec,
+            to_codec: info.toCodec,
+            error_name: info.errorName,
+            output: settings.output,
+            resolution: settings.resolution,
+            fps: settings.fps,
+          }),
       })
       exportModal.close()
       this.showSuccess(`↓ ${t('toast.export.ready', { filename })}`)
+      // Feeds the dialog's "about N min" estimate next time.
+      const throughput = throughputFrom({
+        framesEncoded: stats.framesEncoded,
+        width: this.renderer.canvasSize.width,
+        height: this.renderer.canvasSize.height,
+        videoEncodeMs: stats.videoEncodeMs,
+      })
+      if (throughput !== null) {
+        try {
+          localStorage.setItem(THROUGHPUT_KEY, String(Math.round(throughput)))
+        } catch {}
+      }
+      const elapsedMs = Math.round(performance.now() - exportStartedAt)
       track('export_completed', {
         ...exportBase,
-        elapsed_ms: Math.round(performance.now() - exportStartedAt),
+        elapsed_ms: elapsedMs,
+        codec: stats.codec,
+        hw: stats.hw,
+        latency_mode: stats.latencyMode,
+        attempts: stats.attempts,
+        audio_included: stats.audioIncluded,
+        // 'wasm' = the browser had no AAC encoder (Safari ≤ 18 and similar).
+        audio_encoder: stats.audioEncoder,
+        audio_render_ms: stats.audioRenderMs,
+        audio_encode_ms: stats.audioEncodeMs,
+        video_encode_ms: stats.videoEncodeMs,
+        finalize_ms: stats.finalizeMs,
+        // OPFS commit (Safari copies the whole file here) or the memory Blob.
+        save_ms: stats.saveMs,
+        output_mb: Math.round((stats.outputBytes / 1_048_576) * 10) / 10,
+        // 'opfs' = streamed to disk; 'memory' + why (unsupported / unavailable
+        // / quota / storage_failed). See opfsExports.ts.
+        output_sink: stats.outputSink,
+        output_sink_reason: stats.outputSinkReason,
+        encode_fps:
+          stats.videoEncodeMs > 0
+            ? Math.round(stats.framesEncoded / (stats.videoEncodeMs / 1000))
+            : null,
+        // >1 means the export took longer than the piece itself plays for -
+        // the field's p90 was 4-6× on Windows/Android, hence the ETA UI.
+        realtime_factor: Math.round((elapsedMs / 1000 / Math.max(1, midi.duration)) * 100) / 100,
+        // Per-frame split of the video loop: the largest of the three is what
+        // bounds this device (render → CPU scene work, capture → GPU render +
+        // readback where capture waits on it, stall → encoder). See ExportStats
+        // and docs/EXPORT_PERF_MEASUREMENTS_2026-09-27.md.
+        render_ms_per_frame: perFrameMs(stats.renderMs, stats.framesEncoded),
+        capture_ms_per_frame: perFrameMs(stats.captureMs, stats.framesEncoded),
+        stall_ms_per_frame: perFrameMs(stats.stallMs, stats.framesEncoded),
+        // Encoder start-up, and whether the dialog's pre-warm had finished
+        // (null = still running or never ran) — Chrome's cold start is 3–9 s.
+        first_chunk_ms: stats.firstChunkMs,
+        encoder_prewarm_ms: encoderPrewarmMs(),
       })
     } catch (err) {
-      const isCancel = err instanceof DOMException && err.name === 'AbortError'
-      if (!isCancel) {
-        console.error('Export failed:', err)
-        this.showError((err as Error).message || t('error.export.generic'))
-      }
+      const isCancel = err instanceof DOMException && err.name === 'AbortError' && !glContextLost
+      if (!isCancel) console.error('Export failed:', err)
+      const errorMessage = glContextLost
+        ? t('error.export.gpuLost')
+        : err instanceof ExportStorageError
+          ? t('error.export.storage')
+          : (err as Error).message || t('error.export.generic')
       track(isCancel ? 'export_cancelled' : 'export_failed', {
         ...exportBase,
         stage: exportStage,
+        last_stage: lastStage,
+        pct: Math.round(lastPct * 100) / 100,
         elapsed_ms: Math.round(performance.now() - exportStartedAt),
+        ...(isCancel
+          ? {}
+          : {
+              error_name: glContextLost
+                ? 'webgl_context_lost'
+                : err instanceof Error
+                  ? err.name
+                  : 'UnknownError',
+              error_message: String(err instanceof Error ? err.message || err.name : err).slice(
+                0,
+                200,
+              ),
+              codec: codecInfo.current?.codec ?? null,
+              hw: codecInfo.current?.hw ?? null,
+              attempts: codecInfo.current?.attempts ?? 0,
+              output_sink: sinkInfo.current?.kind ?? null,
+              output_sink_reason: sinkInfo.current?.reason ?? null,
+            }),
       })
-      exportModal.close()
+      if (isCancel) {
+        exportModal.close()
+      } else {
+        // Keep the modal open on an error phase with a one-click lower-res
+        // retry — the old silent close+toast lost 27 of 37 failing users.
+        exportModal.showFailure(errorMessage)
+      }
     } finally {
+      this.renderer.canvas.removeEventListener('webglcontextlost', onGlContextLost)
+      clearExportInflight()
       this.currentExporter = null
-      if (resized) {
+      if (renderPlan) {
         // Match window dimensions instead of the stale originalCanvas values
         // in case the window was resized while we were exporting.
         this.renderer.resize(window.innerWidth, window.innerHeight, originalCanvas.resolution)
@@ -1087,6 +1527,7 @@ export class App {
       if (ppsChanged) this.renderer.setZoom(originalPps)
       this.renderer.resumeAutoRender()
       this.clock.seek(resumeAt)
+      if (metronomeWasRunning) this.metronome.start()
       this.store.setState('status', 'ready')
       if (wasPlaying) {
         this.clock.play()
@@ -1128,6 +1569,13 @@ export class App {
             void this.loadSample(id)
           }
         },
+        onRecent: (id) => {
+          if (resolveTarget() === 'learn') {
+            void this.ensureLearnController().then((c) => c.loadRecent(id))
+          } else {
+            void this.loadRecent(id)
+          }
+        },
       })
     })
   }
@@ -1140,6 +1588,16 @@ export class App {
   }
 
   private openExportModal(): void {
+    // Configuring an export while the piece keeps playing behind the blur is
+    // disorienting; pause like the play button would (status watch stops the
+    // synth). The export itself snapshots/restores the playhead separately.
+    if (this.store.state.mode === 'play' && this.store.state.status === 'playing') {
+      this.clock.pause()
+      this.store.setState('status', 'paused')
+    }
+    // Chrome's first encoder of a session takes ~5 s to start; pay it while
+    // the user is still choosing settings rather than inside the export.
+    void prewarmVideoEncoder()
     void this.exportHandle.get().then((m) => m.open())
   }
 
@@ -1158,7 +1616,6 @@ export class App {
       return
     }
     this.loadSessionAsFile(midi)
-    this.resetPlaybackTelemetry()
     trackMidiLoaded({
       source: 'sample',
       sampleId,
@@ -1166,13 +1623,54 @@ export class App {
       noteCount: countNotes(midi),
       durationS: Math.round(midi.duration),
     })
-    // Samples are a "watch it" gesture — start playback as soon as the synth
-    // is ready. Sample click counts as the user gesture that unlocks audio.
+  }
+
+  // Play-mode loader for a previously-opened file. The bytes are re-parsed
+  // from IndexedDB, so from here on it's the same path a sample takes — we
+  // hold a MidiFile, not a File.
+  private async loadRecent(recentId: string): Promise<void> {
+    this.primeInteractiveAudio()
+    let midi: MidiFile | null
+    try {
+      midi = await readRecentMidi(recentId)
+    } catch (err) {
+      // Stored bytes that no longer parse are dead weight — drop the entry so
+      // the broken card doesn't come back on the next visit.
+      console.error('[loadRecent] parse failed', err)
+      void forgetRecent(recentId)
+      midi = null
+    }
+    if (!midi) {
+      trackEvent('recent_load_failed', { target: 'play' })
+      this.showError(t('error.recent.loadFailed'))
+      return
+    }
+    this.loadSessionAsFile(midi)
+    trackMidiLoaded({
+      source: 'recent',
+      trackCount: midi.tracks.length,
+      noteCount: countNotes(midi),
+      durationS: Math.round(midi.duration),
+    })
+  }
+
+  // Opening a piece — card, drop, or file picker — is a "watch it" gesture, so
+  // playback starts on its own. The short delay is deliberate: the roll and
+  // track panel paint first, so motion begins from a settled layout instead of
+  // racing the mode transition.
+  //
+  // Re-checked inside the timeout, not before it: the user can hit space, seek,
+  // or leave Play during those 250 ms, and none of those should be overridden.
+  private autoplayAfterLoad(): void {
     setTimeout(() => {
-      if (this.store.state.mode === 'play' && this.store.state.status !== 'playing') {
-        this.clock.play()
-        this.store.setState('status', 'playing')
-      }
+      if (this.store.state.mode !== 'play' || this.store.state.status === 'playing') return
+      // Drag-and-drop does not grant user activation (unlike a click), so a
+      // file dropped into a fresh tab can leave audio suspended. Starting then
+      // would freeze the playhead at zero — leave it paused and let the user's
+      // next click, which does prime audio, be the thing that starts it.
+      if (this.clock.audioSuspended) return
+      this.clock.play()
+      this.store.setState('status', 'playing')
     }, 250)
   }
 
@@ -1293,7 +1791,7 @@ export class App {
       return
     }
 
-    if (action === 'open-in-file') {
+    if (action === 'play') {
       const midi = sessionToMidiFile(
         pending.events,
         pending.duration,
@@ -1307,19 +1805,20 @@ export class App {
 
   // Drops the live-session MidiFile into the same play-mode pipeline used by
   // imported .mid files — so it immediately plays back as a rolling piano roll
-  // with MP4/M4A export available.
-  private loadSessionAsFile(midi: import('./core/midi/types').MidiFile): void {
+  // with MP4 / WAV export available. Same contract as loadMidi(): after
+  // completePlayLoad, <PlayMode/>'s effect owns the surface side effects
+  // (renderer.loadMidi, trackPanel.render, dropzone.hide,
+  // keyboardInput.enable, document.title) — don't repeat them here.
+  private loadSessionAsFile(midi: MidiFile): void {
     this.resetInteractionState()
     this.store.beginPlayLoad()
     this.renderer.clearMidi()
-    this.synth.load(midi).catch((err) => console.error('SynthEngine.load failed:', err))
     this.store.completePlayLoad(midi)
-    // Typing keyboard stays on — users can play along with their own session.
-    this.keyboardInput.enable()
-    this.renderer.loadMidi(midi)
-    this.trackPanel.render(midi)
-    this.dropzone.hide()
-    document.title = `${midi.name} · midee`
+    this.synth.load(midi).catch((err) => console.error('SynthEngine.load failed:', err))
+    this.resetPlaybackTelemetry()
+    // You just performed this and pressed Play — the strongest version of the
+    // "you asked for it, so it plays" rule the other loaders follow.
+    this.autoplayAfterLoad()
   }
 
   private async saveLoopAsMidi(): Promise<void> {
@@ -1352,11 +1851,23 @@ export class App {
     track('chord_overlay_toggled', { on: this.chordOverlayOn })
     if (this.chordOverlayOn && this.chordOverlay.isVisible) {
       // Force a fresh reading on toggle-on so the user sees a chord (or "—")
-      // immediately, even if the clock isn't ticking right now.
-      this.chordLastSig = ''
+      // immediately, even if the clock isn't ticking right now. Only the
+      // throttle timestamp is reset — chordLastSig must stay in lockstep
+      // with the overlay's displayed reading (see maybeUpdateChordOverlay),
+      // so if the held pitches changed while the overlay was off this call
+      // sees a signature mismatch and repaints.
       this.chordLastRunMs = 0
       this.maybeUpdateChordOverlay(this.clock.currentTime)
     }
+  }
+
+  // ── Note labels ────────────────────────────────────────────────────────
+  private toggleNoteLabels(): void {
+    this.noteLabelsOn = !this.noteLabelsOn
+    this.renderer.setNoteLabels(this.noteLabelsOn)
+    this.customizeMenu?.setNoteLabels(this.noteLabelsOn)
+    noteLabelsStore.save(this.noteLabelsOn)
+    track('note_labels_toggled', { on: this.noteLabelsOn })
   }
 
   // Effective visibility = user's saved preference AND current mode supports it.
@@ -1368,21 +1879,27 @@ export class App {
   }
 
   // Builds the active-pitch set from the right sources for the current mode,
-  // detects a chord, and pushes it to the overlay. Throttled to ~70ms because
-  // chords don't change at 60 fps and the per-frame cost on long files is
-  // wasted otherwise.
+  // detects a chord, and pushes it to the overlay. Gated on the overlay being
+  // *visible* — not just the saved preference — because in play mode (where
+  // the overlay never shows) collectActivePitches scans every elapsed note,
+  // and the preference defaults to on for everyone. The whole body sits
+  // behind the ~70ms throttle for the same reason: chords don't change at
+  // 60 fps, so the worst-case readout latency is imperceptible while the
+  // per-tick scan is not free on long files.
+  //
+  // Invariant: `chordLastSig` always matches what the overlay displays -
+  // they are only ever written together below. Callers must not reset the
+  // signature independently or a skipped update leaves a stale reading.
   private maybeUpdateChordOverlay(time: number): void {
-    if (!this.chordOverlayOn) return
+    if (!this.chordOverlayOn || !this.chordOverlay.isVisible) return
     const now = performance.now()
+    if (now - this.chordLastRunMs < 70) return
+    this.chordLastRunMs = now
     const pitches = this.collectActivePitches(time)
     const sig = pitchSignature(pitches)
-    if (sig === this.chordLastSig && now - this.chordLastRunMs < 250) return
-    if (sig !== this.chordLastSig || now - this.chordLastRunMs >= 70) {
-      this.chordLastSig = sig
-      this.chordLastRunMs = now
-      const reading = detectChord(pitches)
-      this.chordOverlay.update(reading)
-    }
+    if (sig === this.chordLastSig) return
+    this.chordLastSig = sig
+    this.chordOverlay.update(detectChord(pitches))
   }
 
   private collectActivePitches(currentTime: number): Set<number> {
@@ -1390,7 +1907,9 @@ export class App {
     const mode = this.store.state.mode
 
     // Live performance — what the player and looper are pressing right now.
-    if (mode === 'live' || mode === 'home') {
+    // Learn counts here too: the user plays along, so the chord readout should
+    // narrate their held notes (the visibility gate already allows non-play).
+    if (mode === 'live' || mode === 'home' || mode === 'learn') {
       for (const [pitch] of this.liveNotes.heldNotes) set.add(pitch)
       for (const [pitch] of this.loopNotes.heldNotes) set.add(pitch)
       return set
@@ -1453,7 +1972,7 @@ export class App {
     this.renderer.setTheme(theme)
     this.customizeMenu?.setTheme(this.themeIndex)
     this.trackPanel?.setTheme(theme)
-    const accent = theme.uiAccentCSS
+    const accent = accentCSS(theme)
     document.documentElement.style.setProperty('--accent', accent)
     document.documentElement.style.setProperty('--accent-soft', `${accent}2e`)
     document.documentElement.style.setProperty('--accent-glow', `${accent}66`)
@@ -1514,43 +2033,54 @@ export class App {
 }
 
 // User-preference persistence. Each entry exposes load()/save() backed by
-// localStorage. Defined here (not in persistence.ts) because the defaults
-// depend on runtime values — current theme list, instrument list, etc.
-const themeIndexStore = indexPersisted(
-  'midee.themeIndex',
-  Math.max(
-    0,
-    THEMES.findIndex((t) => t.name === 'Sunset'),
-  ),
-  THEMES.length,
+// localStorage. Defined here (not in persistence.ts) because they validate
+// against rosters owned by other modules. Stored as stable ids, with a one-shot
+// migration from the old `midee.*Index` integer keys (see `idPersisted`).
+const themeStore = idPersisted<ThemeId>(
+  'midee.theme',
+  'sunset',
+  THEMES.map((t) => t.id),
+  { key: 'midee.themeIndex', ids: ALL_THEMES.map((t) => t.id) },
 )
 // New visitors default to Upright (1.2 MB of self-hosted samples) so first-load
 // is fast. Returning users keep whatever they had, including Salamander Grand.
-const instrumentIndexStore = indexPersisted(
-  'midee.instrumentIndex',
-  Math.max(
-    0,
-    INSTRUMENTS.findIndex((i) => i.id === 'upright'),
-  ),
-  INSTRUMENTS.length,
+const instrumentStore = idPersisted<InstrumentId>(
+  'midee.instrument',
+  'upright',
+  INSTRUMENTS.map((i) => i.id),
+  { key: 'midee.instrumentIndex', ids: INSTRUMENTS.map((i) => i.id) },
 )
-const particleIndexStore = indexPersisted(
-  'midee.particleIndex',
-  Math.max(
-    0,
-    PARTICLE_STYLES.findIndex((s) => s.id === 'embers'),
-  ),
-  PARTICLE_STYLES.length,
+const particleStore = idPersisted<ParticleStyle>(
+  'midee.particle',
+  'embers',
+  PARTICLE_STYLES.map((s) => s.id),
+  { key: 'midee.particleIndex', ids: ALL_PARTICLE_STYLES.map((s) => s.id) },
 )
 const metronomeBpmStore = numberPersisted('midee.metronomeBpm', 120, 40, 240)
 // Chord readout defaults *on*: it's the headline live-mode cue. The
 // boolean store treats "no preference" as the fallback (true), and only
 // an explicit "false" turns it off.
 const chordOverlayStore = booleanPersisted('midee.chordOverlay', true)
+// Note-name labels on the bars default off — a play-along aid, not the
+// default look. Never rename the key.
+const noteLabelsStore = booleanPersisted('midee.noteLabels', false)
+
+// Persisted id → list index. Stores only return roster ids, so -1 is unreachable.
+function indexOfId<T extends { id: string }>(list: readonly T[], id: string): number {
+  return Math.max(
+    0,
+    list.findIndex((item) => item.id === id),
+  )
+}
 
 // Strips characters that misbehave in filenames across Windows/macOS/Linux.
 // Falls back to a constant if the result is empty.
 function sanitiseFilename(name: string): string {
   const cleaned = name.replace(/[\\/:*?"<>|]+/g, ' ').trim()
   return cleaned.length > 0 ? cleaned : 'midee'
+}
+
+// A loop total spread over its frames, to 0.01 ms (telemetry).
+function perFrameMs(totalMs: number, frames: number): number | null {
+  return frames > 0 ? Math.round((totalMs / frames) * 100) / 100 : null
 }

@@ -9,7 +9,7 @@ import { trackEvent } from '../telemetry'
 import { icons } from './icons'
 import { FEEDBACK_URL } from './utils'
 
-export type SessionAction = 'open-in-file' | 'download' | 'discard'
+export type SessionAction = 'play' | 'download' | 'discard'
 
 interface ViewProps {
   container: HTMLElement
@@ -33,11 +33,11 @@ function PostSessionView(props: ViewProps) {
         {/* biome-ignore-end lint/a11y/useKeyWithClickEvents: — */}
         {/* biome-ignore-end lint/a11y/noStaticElementInteractions: — */}
         <div class="post-session-card modal-scroll">
-          <header class="export-header">
-            <div class="export-card-icon" innerHTML={icons.waveform()} />
-            <div class="export-header-text">
+          <header class="modal-header">
+            <div class="modal-header-icon" innerHTML={icons.waveform()} />
+            <div class="modal-header-text">
               <h2 class="export-card-title">{t('postSession.title')}</h2>
-              <p class="export-card-sub">{props.stats()}</p>
+              <p class="modal-header-sub">{props.stats()}</p>
             </div>
           </header>
 
@@ -45,12 +45,12 @@ function PostSessionView(props: ViewProps) {
             <button
               type="button"
               class="post-session-option post-session-option--primary"
-              onClick={() => props.onAction('open-in-file')}
+              onClick={() => props.onAction('play')}
             >
               <span class="post-session-option-icon" innerHTML={icons.timeline()} />
               <span class="post-session-option-body">
-                <span class="post-session-option-title">{t('postSession.openInFile.title')}</span>
-                <span class="post-session-option-sub">{t('postSession.openInFile.sub')}</span>
+                <span class="post-session-option-title">{t('postSession.play.title')}</span>
+                <span class="post-session-option-sub">{t('postSession.play.sub')}</span>
               </span>
             </button>
 
@@ -114,7 +114,7 @@ export class PostSessionModal {
 
   constructor(container: HTMLElement) {
     const [isOpen, setIsOpen] = createSignal(false)
-    const [stats, setStats] = createSignal('—')
+    const [stats, setStats] = createSignal('-')
 
     this.setIsOpen = setIsOpen
     this.readIsOpen = isOpen

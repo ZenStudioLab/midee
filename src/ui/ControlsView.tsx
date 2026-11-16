@@ -1,7 +1,8 @@
+import { createEffect, onCleanup, onMount } from 'solid-js'
 import { t } from '../i18n'
 import type { LiveLooperState } from '../midi/LiveLooper'
 import type { MidiDeviceStatus } from '../midi/MidiInputManager'
-import type { AppMode } from '../store/state'
+import { type AppMode, TRANSPOSE_LIMIT } from '../store/state'
 import { FloatingHud } from './FloatingHud'
 import { icons } from './icons'
 
@@ -21,6 +22,7 @@ export interface TopStripProps {
   midiDeviceName: () => string
   midiPillLabel: () => string
   midiMenuLabel: () => string
+  pedal: () => { visible: boolean; down: boolean }
   dim: () => boolean
   onHome: () => void
   onMode: (m: Exclude<AppMode, 'home'>) => void
@@ -76,11 +78,18 @@ export interface HudProps {
   volume: () => number
   speed: () => number
   speedLabel: () => string
+  transpose: () => number
+  onTranspose: (semitones: number) => void
   zoom: () => number
   wakeRef: (fn: () => void) => void
   togglePinRef: (fn: () => void) => void
   onIdleChange: (idle: boolean) => void
   onHasDragged: () => void
+  // Session-only collapse: when closed, the pill shrinks to a small draggable
+  // icon (handled inside FloatingHud). Not persisted — always starts open.
+  closed: () => boolean
+  onClose: () => void
+  onReopen: () => void
 }
 
 export interface KeyHintProps {
@@ -102,6 +111,54 @@ export function TopStripView(props: TopStripProps) {
     if (m === 'play' || m === 'live' || m === 'learn') return m
     return 'none'
   }
+
+  // Mode-switch thumb. Segments are content-width (labels differ per locale
+  // and inactive labels hide on narrow screens), so the thumb can't use a
+  // static one-third position — we measure the active segment and slide the
+  // thumb to its exact offset/width. offsetLeft/offsetWidth and the thumb's
+  // own offsetLeft all share the same offsetParent (the switch), so their
+  // difference is the precise translation regardless of border/padding.
+  let thumbEl: HTMLSpanElement | undefined
+  const segEls: Partial<Record<'play' | 'live' | 'learn', HTMLButtonElement>> = {}
+
+  // animate=false snaps without a slide — used for the first paint and for
+  // resize/font reflows, where a sliding thumb would look like a glitch.
+  const positionThumb = (animate = true): void => {
+    if (!thumbEl) return
+    const m = activeMode()
+    const seg = m === 'play' || m === 'live' || m === 'learn' ? segEls[m] : undefined
+    if (!seg) {
+      thumbEl.style.opacity = '0'
+      return
+    }
+    if (!animate) thumbEl.style.transition = 'none'
+    thumbEl.style.width = `${seg.offsetWidth}px`
+    thumbEl.style.transform = `translateX(${seg.offsetLeft - thumbEl.offsetLeft}px)`
+    thumbEl.style.opacity = '1'
+    if (!animate) {
+      void thumbEl.offsetWidth // flush the snap before restoring transitions
+      thumbEl.style.transition = ''
+    }
+  }
+
+  // Reposition on mode change (label visibility shifts segment widths too).
+  // First run snaps into place; subsequent mode changes slide.
+  let primed = false
+  createEffect(() => {
+    activeMode()
+    positionThumb(primed)
+    primed = true
+  })
+
+  onMount(() => {
+    // Web-font swap can change label metrics after first paint.
+    if (document.fonts?.ready) void document.fonts.ready.then(() => positionThumb(false))
+    // Breakpoints toggle labels / padding, changing segment widths.
+    const onResize = (): void => positionThumb(false)
+    window.addEventListener('resize', onResize)
+    onCleanup(() => window.removeEventListener('resize', onResize))
+  })
+
   return (
     <div
       id="top-strip"
@@ -136,6 +193,7 @@ export function TopStripView(props: TopStripProps) {
           class="ts-mode-seg"
           classList={{ 'is-active': props.mode() === 'play' }}
           id="ts-mode-play"
+          ref={(el) => (segEls.play = el)}
           type="button"
           role="tab"
           aria-selected={props.mode() === 'play' ? 'true' : 'false'}
@@ -149,6 +207,7 @@ export function TopStripView(props: TopStripProps) {
           class="ts-mode-seg"
           classList={{ 'is-active': props.mode() === 'live' }}
           id="ts-mode-live"
+          ref={(el) => (segEls.live = el)}
           type="button"
           role="tab"
           aria-selected={props.mode() === 'live' ? 'true' : 'false'}
@@ -162,6 +221,7 @@ export function TopStripView(props: TopStripProps) {
           class="ts-mode-seg"
           classList={{ 'is-active': props.mode() === 'learn' }}
           id="ts-mode-learn"
+          ref={(el) => (segEls.learn = el)}
           type="button"
           role="tab"
           aria-selected={props.mode() === 'learn' ? 'true' : 'false'}
@@ -171,7 +231,7 @@ export function TopStripView(props: TopStripProps) {
           <span class="ts-mode-icon" aria-hidden="true" innerHTML={icons.practice()} />
           <span class="ts-mode-label">{t('topStrip.mode.learn.label')}</span>
         </button>
-        <span class="ts-mode-thumb" aria-hidden="true" />
+        <span class="ts-mode-thumb" aria-hidden="true" ref={(el) => (thumbEl = el)} />
       </div>
 
       <div class="ts-status" id="ts-status" aria-live="polite">
@@ -190,6 +250,21 @@ export function TopStripView(props: TopStripProps) {
           <span />
           <span />
         </span>
+        {/* Sustain-pedal light: the piece's pedal in Play/Learn, the player's
+            own anywhere. A status glyph next to the title, not a control —
+            no border, no hover, state carried by `data-down` so the
+            aria-live status region doesn't announce every press. Hidden
+            when nothing can hold the pedal. */}
+        <span
+          class="ts-pedal"
+          classList={{ hidden: !props.pedal().visible }}
+          id="ts-pedal"
+          role="img"
+          aria-label={t('topStrip.pedal')}
+          data-tip={t('topStrip.pedal')}
+          data-down={props.pedal().down ? '' : undefined}
+          innerHTML={icons.pedal(13)}
+        />
         <span id="ts-chord-slot" class="ts-chord-slot" />
       </div>
 
@@ -205,6 +280,11 @@ export function TopStripView(props: TopStripProps) {
           <span innerHTML={icons.upload()} />
           <span>{t('home.cta.openMidi')}</span>
         </button>
+        {/* Appearance/Customize is pinned near the start of the right cluster
+            so the strip's right-edge overflow (the grid never shrinks .ts-end —
+            see #top-strip in main.css) clips the contextual pills (export,
+            MIDI, tracks) before it ever reaches Appearance. */}
+        <span id="ts-customize-slot" />
         <button
           ref={(el) => props.registerTracksBtn(el)}
           class="ts-pill ts-pill--file"
@@ -251,7 +331,6 @@ export function TopStripView(props: TopStripProps) {
             {props.midiPillLabel()}
           </span>
         </button>
-        <span id="ts-customize-slot" />
         <button
           class="ts-record-btn"
           classList={{
@@ -272,6 +351,16 @@ export function TopStripView(props: TopStripProps) {
 }
 
 export function HudView(props: HudProps) {
+  // What unmuting returns to. Dragging the slider to 0 by hand is also a mute,
+  // so only ever record an audible level — and fall back to full rather than
+  // unmuting into silence if the session started at 0.
+  let lastAudible = 1
+  createEffect(() => {
+    const v = props.volume()
+    if (v > 0) lastAudible = v
+  })
+  const restoreVolume = (): number => (lastAudible > 0 ? lastAudible : 1)
+
   return (
     <FloatingHud
       id="hud"
@@ -290,6 +379,9 @@ export function HudView(props: HudProps) {
       togglePinRef={props.togglePinRef}
       onIdleChange={props.onIdleChange}
       onHasDragged={props.onHasDragged}
+      collapsed={props.closed}
+      onClose={props.onClose}
+      onReopen={props.onReopen}
     >
       <div class="hud-bar">
         <div class="hud-group hud-group--transport">
@@ -309,6 +401,7 @@ export function HudView(props: HudProps) {
             id="hud-play"
             aria-label={t('hud.aria.play')}
             data-tip={t('hud.play')}
+            data-playing={props.playing() ? 'true' : 'false'}
             onClick={() => props.onPlay()}
             innerHTML={props.playing() ? icons.pause() : icons.play()}
           />
@@ -351,8 +444,18 @@ export function HudView(props: HudProps) {
 
         <div class="hud-divider hud-group--transport" />
 
-        <div class="ctrl-group" data-tip={t('hud.volume')}>
-          <span class="ctrl-icon" innerHTML={icons.volume()} />
+        {/* Tooltips live on the two children, NOT on the group: a data-tip
+            nested inside another data-tip renders both bubbles at once. */}
+        <div class="ctrl-group">
+          <button
+            type="button"
+            class="ctrl-icon ctrl-icon--btn"
+            data-tip={props.volume() === 0 ? t('hud.unmute') : t('hud.mute')}
+            aria-label={props.volume() === 0 ? t('hud.unmute') : t('hud.mute')}
+            aria-pressed={props.volume() === 0}
+            onClick={() => props.onVolume(props.volume() === 0 ? restoreVolume() : 0)}
+            innerHTML={props.volume() === 0 ? icons.volumeMuted() : icons.volume()}
+          />
           <input
             type="range"
             id="hud-volume"
@@ -361,47 +464,107 @@ export function HudView(props: HudProps) {
             max="1"
             step="0.02"
             value={props.volume()}
+            /* The tooltip CSS matches :active as well as :hover, so this stays
+               up during the drag and reads out live. */
+            data-tip={`${t('hud.volume')} · ${Math.round(props.volume() * 100)}%`}
             style={{ '--pct': `${props.volume() * 100}%` }}
             aria-label={t('hud.aria.volume')}
             onInput={(e) => props.onVolume(parseFloat(e.currentTarget.value))}
           />
         </div>
 
+        {/* Every other neighbouring group is separated; without this the bare
+            chip reads as part of the volume control sitting beside it. */}
+        <div class="hud-divider hud-group--transport" />
+
         <div class="ctrl-group hud-group--transport" data-tip={t('hud.speed')}>
-          <span class="speed-val" id="hud-speed-val">
-            {props.speedLabel()}
-          </span>
-          <input
-            type="range"
-            id="hud-speed"
-            class="mini-slider"
-            min="0.25"
-            max="2"
-            step="0.05"
-            value={props.speed()}
-            style={{ '--pct': `${((props.speed() - 0.25) / 1.75) * 100}%` }}
+          {/* Shift reverses — that also covers the keyboard, since Enter on a
+              focused button fires a click carrying the modifier. */}
+          <button
+            type="button"
+            class="speed-chip"
+            id="hud-speed-val"
+            data-off={props.speed() === 1 ? undefined : ''}
             aria-label={t('hud.aria.speed')}
-            onInput={(e) => props.onSpeed(parseFloat(e.currentTarget.value))}
-          />
+            onClick={(e) => props.onSpeed(stepSpeedPreset(props.speed(), e.shiftKey ? -1 : 1))}
+          >
+            {props.speedLabel()}
+          </button>
+        </div>
+
+        <div class="hud-divider hud-group--transport" />
+
+        {/* Discrete stepper, no slider: 25 integer positions over a 60px track
+            is unusable, and semitones are things you count, not drag to. The
+            value doubles as the reset button (click → 0), mirroring how the
+            speed chip carries its own action. One data-tip on the group — a
+            nested data-tip would render two bubbles at once. */}
+        <div class="ctrl-group hud-transpose hud-group--transport" data-tip={t('hud.transpose')}>
+          <button
+            type="button"
+            class="hud-transpose-step"
+            id="hud-transpose-dec"
+            aria-label={t('hud.aria.transposeDown')}
+            disabled={props.transpose() <= -TRANSPOSE_LIMIT}
+            onClick={() => props.onTranspose(props.transpose() - 1)}
+          >
+            −
+          </button>
+          <button
+            type="button"
+            class="hud-transpose-val"
+            id="hud-transpose-val"
+            data-off={props.transpose() === 0 ? undefined : ''}
+            aria-label={t('hud.aria.transposeReset')}
+            onClick={() => props.onTranspose(0)}
+          >
+            {formatTranspose(props.transpose())}
+          </button>
+          <button
+            type="button"
+            class="hud-transpose-step"
+            id="hud-transpose-inc"
+            aria-label={t('hud.aria.transposeUp')}
+            disabled={props.transpose() >= TRANSPOSE_LIMIT}
+            onClick={() => props.onTranspose(props.transpose() + 1)}
+          >
+            +
+          </button>
         </div>
 
         <div class="hud-divider" />
 
-        <div class="ctrl-group" data-tip={t('hud.zoom')}>
+        {/* Percentage of the default, not raw pixels-per-second: 200 means
+            nothing to a user, "100%" places you against the norm. */}
+        <div
+          class="ctrl-group"
+          data-tip={`${t('hud.zoom')} · ${Math.round((props.zoom() / ZOOM_DEFAULT) * 100)}%`}
+        >
           <span class="ctrl-icon" innerHTML={icons.zoom()} />
           <input
             type="range"
             id="hud-zoom"
-            class="mini-slider mini-slider--zoom"
+            class="mini-slider mini-slider--zoom mini-slider--detent"
             min={ZOOM_MIN}
             max={ZOOM_MAX}
             step="10"
             value={props.zoom()}
             style={{
               '--pct': `${((props.zoom() - ZOOM_MIN) / (ZOOM_MAX - ZOOM_MIN)) * 100}%`,
+              '--detent': `${((ZOOM_DEFAULT - ZOOM_MIN) / (ZOOM_MAX - ZOOM_MIN)) * 100}%`,
             }}
             aria-label={t('hud.aria.zoom')}
-            onInput={(e) => props.onZoom(parseFloat(e.currentTarget.value))}
+            onInput={(e) => {
+              const el = e.currentTarget
+              const snapped = snapTo(parseFloat(el.value), ZOOM_DEFAULT, 15)
+              // Pin the element itself. Writing the same value back to the
+              // signal is a no-op in Solid, so without this the store snaps but
+              // the DOM keeps the value the browser just set — the thumb slides
+              // free across the whole detent band while zoom sits at default.
+              if (parseFloat(el.value) !== snapped) el.value = String(snapped)
+              props.onZoom(snapped)
+            }}
+            onDblClick={() => props.onZoom(ZOOM_DEFAULT)}
           />
         </div>
 
@@ -592,6 +755,10 @@ export function KeyHintView(props: KeyHintProps) {
           <span class="kh-label">{t('keyHint.shortcuts')}</span>
           <div class="kh-shortcuts">
             <span class="kh-combo">
+              <kbd>Space</kbd>
+              <span>{t('keyHint.shortcut.sustain')}</span>
+            </span>
+            <span class="kh-combo">
               <kbd>Tab</kbd>
               <span>{t('keyHint.shortcut.record')}</span>
             </span>
@@ -667,6 +834,39 @@ export function formatMMSS(s: number): string {
   const m = Math.floor(s / 60)
   const sec = Math.floor(s % 60)
   return `${m.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}`
+}
+
+// Speed is a discrete chip, not a slider: a 60px track over 0.25-2 at step 0.05
+// is 36 steps of ~1.7px, and nobody is meaningfully choosing 1.05x over 1.10x.
+// These are the values people actually practise and watch at.
+export const SPEED_PRESETS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2] as const
+
+// Cycle to the next/previous preset, wrapping at both ends. `current` may be an
+// arbitrary value (a persisted setting from the old slider, or a URL param), so
+// we resolve to the nearest preset first rather than assuming an exact match.
+export function stepSpeedPreset(current: number, delta: number): number {
+  let nearest = 0
+  for (let i = 1; i < SPEED_PRESETS.length; i++) {
+    if (Math.abs(SPEED_PRESETS[i]! - current) < Math.abs(SPEED_PRESETS[nearest]! - current)) {
+      nearest = i
+    }
+  }
+  const len = SPEED_PRESETS.length
+  return SPEED_PRESETS[(((nearest + delta) % len) + len) % len]!
+}
+
+// Magnetic detent. The mini-sliders are only 60-64px wide, so a step is ~1.2-1.7px
+// and the default value is a target you can reach by arithmetic but never by
+// feel. Pull to it whenever the drag lands close enough.
+export function snapTo(value: number, target: number, tolerance: number): number {
+  return Math.abs(value - target) <= tolerance ? target : value
+}
+
+// "0" / "+2" / "−3". U+2212 MINUS SIGN, not a hyphen — it matches the metronome
+// stepper's glyph and lines up in the tabular-numerals font.
+export function formatTranspose(semitones: number): string {
+  if (semitones === 0) return '0'
+  return semitones > 0 ? `+${semitones}` : `−${-semitones}`
 }
 
 export function formatSpeed(s: number): string {

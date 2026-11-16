@@ -53,16 +53,21 @@ export class ComputerKeyboardInput {
   readonly noteOn = createEventSignal<MidiNoteEvent | null>(null)
   readonly noteOff = createEventSignal<MidiNoteEvent | null>(null)
   readonly octave = createEventSignal<number>(DEFAULT_OCTAVE)
-  // Software stand-in for a sustain pedal: Space-bar hold mirrors a damper.
-  // Useful for users without hardware pedals; merged with the MIDI-device
-  // pedal upstream in App so either source can engage sustain.
+  // Software sustain pedal: hold Space. Only where Space has no transport job
+  // (`pedalKeyActive`, Live mode) — in Play it is play/pause and Learn's
+  // exercises use it too. Shift can't be the pedal: every Live command letter
+  // (R L U C M P) is also a note key, so Shift is the command modifier.
+  // Merged with a MIDI-device pedal in LivePerformanceBus.
   readonly pedal = createEventSignal<boolean>(false)
 
   private active = false
   private held = new Map<string, number>() // code → pitch (for correct release after octave change)
   private pedalHeld = false
 
-  constructor(private readonly clock: MasterClock) {}
+  constructor(
+    private readonly clock: MasterClock,
+    private readonly pedalKeyActive: () => boolean = () => true,
+  ) {}
 
   enable(): void {
     if (this.active) return
@@ -104,17 +109,6 @@ export class ComputerKeyboardInput {
   private onKeyDown = (e: KeyboardEvent): void => {
     if (this.shouldIgnore(e)) return
 
-    // Spacebar = software sustain pedal (hold to engage, release to lift).
-    // Placed before arrow-key handling so auto-repeat doesn't re-emit.
-    if (e.code === 'Space') {
-      e.preventDefault()
-      if (!this.pedalHeld) {
-        this.pedalHeld = true
-        this.pedal.set(true)
-      }
-      return
-    }
-
     if (e.code === 'ArrowDown') {
       e.preventDefault()
       this.shiftOctaveDown()
@@ -123,6 +117,14 @@ export class ComputerKeyboardInput {
     if (e.code === 'ArrowUp') {
       e.preventDefault()
       this.shiftOctaveUp()
+      return
+    }
+    if (e.code === 'Space' && this.pedalKeyActive()) {
+      e.preventDefault()
+      if (!this.pedalHeld) {
+        this.pedalHeld = true
+        this.pedal.set(true)
+      }
       return
     }
 
@@ -141,6 +143,8 @@ export class ComputerKeyboardInput {
   }
 
   private onKeyUp = (e: KeyboardEvent): void => {
+    // Released regardless of the mode predicate, so a mode switch mid-hold
+    // can't leave the damper down.
     if (e.code === 'Space' && this.pedalHeld) {
       this.pedalHeld = false
       this.pedal.set(false)

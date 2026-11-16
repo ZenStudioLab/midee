@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { isBlackKey, type MidiNote } from '../core/midi/types'
+import { BLACK_KEY_HEIGHT_RATIO } from './keyGeometry'
 import { Viewport, type ViewportConfig, visibleNoteRange } from './viewport'
 
 const note = (time: number, duration: number): MidiNote => ({
@@ -130,6 +131,16 @@ describe('Viewport.pitchAtPoint', () => {
     expect(isBlackKey(pitch!)).toBe(false)
   })
 
+  it('places the black/white zone boundary at BLACK_KEY_HEIGHT_RATIO of the keyboard', () => {
+    const vp = makeViewport({ pitchMin: 60, pitchMax: 71 })
+    const cSharp = vp.getAllKeyPositions().get(61)!
+    const xMid = cSharp.x + cSharp.width / 2
+    // keyboardTop = 500, keyboardHeight = 100. Boundary is inclusive.
+    const boundary = 500 + 100 * BLACK_KEY_HEIGHT_RATIO
+    expect(vp.pitchAtPoint(xMid, boundary)).toBe(61)
+    expect(vp.pitchAtPoint(xMid, boundary + 1)).not.toBe(61)
+  })
+
   it('resolves a clearly-white region to its white key in both zones', () => {
     const vp = makeViewport({ pitchMin: 60, pitchMax: 71 })
     const c4 = vp.getAllKeyPositions().get(60)!
@@ -181,6 +192,20 @@ describe('Viewport.buildKeyLayout with narrowed pitch range (fit-to-piece)', () 
     expect(vp.pitchToX(48)).toBeCloseTo(0)
     expect(vp.pitchWidth(49)).toBeCloseTo(38.667, 2)
     expect(vp.pitchToX(49)).toBeCloseTo(47.333, 2)
+  })
+
+  // Draw sites gate on hasKey because pitchToX/pitchWidth fall back to 0 for
+  // an unmapped pitch — a degenerate bar at x = 0 instead of nothing.
+  it('hasKey reports which pitches the current layout can draw', () => {
+    const vp = makeViewport({ canvasWidth: 1000 })
+    expect(vp.hasKey(21)).toBe(true)
+    expect(vp.hasKey(108)).toBe(true)
+    expect(vp.hasKey(20)).toBe(false)
+    expect(vp.hasKey(109)).toBe(false)
+
+    vp.update({ pitchMin: 48, pitchMax: 72 })
+    expect(vp.hasKey(60)).toBe(true)
+    expect(vp.hasKey(47)).toBe(false)
   })
 
   it('narrowing the range via update() rebuilds the layout wider', () => {

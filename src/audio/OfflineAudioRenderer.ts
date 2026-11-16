@@ -9,16 +9,21 @@
 // the main thread; we report progress, then `resume()` to continue.
 
 import {
-  gainToDb,
   getContext,
-  getDestination,
   getTransport,
   OfflineContext,
   Part,
   setContext,
+  type ToneAudioBuffer,
 } from 'tone'
 import type { MidiFile } from '../core/midi/types'
 import { createInstrument, type InstrumentId, preloadSampleBuffers } from './instruments'
+import {
+  getMasterBusRouting,
+  type MasterBusRouting,
+  setMasterBusRouting,
+  setMasterVolume,
+} from './masterBus'
 import { buildOfflineEvents, type OfflineNoteEvent } from './offlineEvents'
 
 export { buildOfflineEvents, type OfflineNoteEvent } from './offlineEvents'
@@ -38,12 +43,16 @@ export interface OfflineRenderOptions {
   // `true` means `onProgress` will be called; `false` = no suspend API (older
   // runtimes) — the UI should stay indeterminate for this stage.
   onRenderAudioProgressMode?: (determinate: boolean) => void
+  // Bench only: 'raw' renders without the master bus's soft-clip ceiling so
+  // instrument levels can be measured. Product code never sets it.
+  busRouting?: MasterBusRouting
 }
 
 // 44.1 kHz matches AAC output in the muxer — rendering at 48 kHz cost ~9% more
 // per render for no audible benefit on the downstream MP4 track. The exported
-// AudioBuffer is what the WebCodecs AudioEncoder consumes, so its sample rate
-// flows straight through to the MP4's audio stream.
+// AudioBuffer is what VideoExporter's AAC encoder consumes, so its sample rate
+// flows straight through to the MP4's audio stream. VideoExporter probes for an
+// encoder at this rate before the render exists (AUDIO_PROBE_SAMPLE_RATE).
 const DEFAULT_SAMPLE_RATE = 44_100
 
 // Small tail past midi.duration so release envelopes on the final notes don't
@@ -84,13 +93,18 @@ export async function renderAudioOffline(opts: OfflineRenderOptions): Promise<Au
   const rawContext = new OfflineAudioContext(2, Math.ceil(renderDuration * sampleRate), sampleRate)
   const offline = new OfflineContext(rawContext)
   const prevContext = getContext()
+  const prevRouting = getMasterBusRouting()
   setContext(offline)
 
+  let rendering: Promise<ToneAudioBuffer>
   try {
     opts.onRenderAudioProgressMode?.(typeof rawContext.suspend === 'function')
 
     const inst = await createInstrument(instrumentId)
-    getDestination().volume.value = gainToDb(volume)
+    // Bus is per context — this builds the offline one (volume + ceiling),
+    // so exports go through exactly the playback output path.
+    setMasterVolume(volume)
+    if (opts.busRouting) setMasterBusRouting(opts.busRouting)
 
     const transport = getTransport()
     transport.bpm.value = midi.bpm
@@ -130,11 +144,20 @@ export async function renderAudioOffline(opts: OfflineRenderOptions): Promise<Au
       }
     }
 
-    const toneBuffer = await offline.render()
-    const raw = toneBuffer.get()
-    if (!raw) throw new Error('Offline audio render produced no buffer')
-    return raw
+    rendering = offline.render()
   } finally {
+    // Tone.Offline's order: the global context goes back as soon as the render
+    // is started — everything above captured the offline one. Holding it for
+    // the whole render put the app's MasterClock and synth (which read the
+    // global) on the offline clock when playback resumed after a cancelled
+    // export: stuck transport, negative time.
     setContext(prevContext)
+    // Routing is module-global; a bench render must not leak 'raw' into the
+    // live bus. The offline bus keeps what it was built with.
+    if (opts.busRouting) setMasterBusRouting(prevRouting)
   }
+
+  const raw = (await rendering).get()
+  if (!raw) throw new Error('Offline audio render produced no buffer')
+  return raw
 }
